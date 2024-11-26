@@ -2125,9 +2125,13 @@ static int port_renew_transport(struct port *p)
 		return 0;
 	}
 
-	/* Closing and binding of raw sockets is too slow and unnecessary */
-	if (transport_type(p->trp) == TRANS_IEEE_802_3) {
+	switch(transport_type(p->trp))
+	{
+	case TRANS_IEEE_802_3:	// Closing and binding of raw sockets is too slow and unnecessary
+	case TRANS_UDP_IPV4:	// Closing and binding of udp sockets could disturb other multicast streams
 		return 0;
+	default:
+		break;
 	}
 
 	transport_close(p->trp, &p->fda);
