@@ -1796,6 +1796,14 @@ static int port_renew_transport(struct port *p)
 	if (!port_is_enabled(p)) {
 		return 0;
 	}
+	switch(transport_type(p->trp))
+	{
+	case TRANS_IEEE_802_3:	// Closing and binding of raw sockets is too slow and unnecessary
+	case TRANS_UDP_IPV4:	// Closing and binding of udp sockets could disturb other multicast streams
+		return 0;
+	default:
+		break;
+	}
 	transport_close(p->trp, &p->fda);
 	port_clear_fda(p, FD_FIRST_TIMER);
 	res = transport_open(p->trp, p->iface, &p->fda, p->timestamping);
