@@ -25,9 +25,11 @@
 
 #include "notification.h"
 #include "print.h"
+#include "sad.h"
 #include "tlv.h"
 #include "transport.h"
 #include "pmc_common.h"
+#include "power_profile.h"
 
 #define BAD_ACTION   -1
 #define BAD_ID       -1
@@ -54,6 +56,25 @@
 #define EMPTY_CLOCK_DESCRIPTION 22
 /* Includes one extra byte to make length even. */
 #define EMPTY_PTP_TEXT 2
+/* Field                  Len  Type
+ * -------------------------------------------------------
+ * portIdentity          10    UInteger16 + 8 * Octets
+ * port_state             1    uint8_t
+ * timestamping           1    uint8_t
+ * interface              1    PTPText
+ * extra                  1    make length even
+ * -------------------------------------------------------
+ * TOTAL                 14
+ */
+#define EMPTY_PORT_PROPERTIES_NP 14
+/* Field                  Len  Type
+ * -------------------------------------------------------
+ * actualTableSize        2    UInteger16
+ * unicast_masters        0    Zero length array
+ * -------------------------------------------------------
+ * TOTAL                  2
+ */
+#define EMPTY_UNICAST_MASTER_TABLE_NP 2
 
 static void do_get_action(struct pmc *pmc, int action, int index, char *str);
 static void do_set_action(struct pmc *pmc, int action, int index, char *str);
@@ -76,61 +97,67 @@ struct management_id {
 
 struct management_id idtab[] = {
 /* Clock management ID values */
-	{ "USER_DESCRIPTION", TLV_USER_DESCRIPTION, do_get_action },
-	{ "SAVE_IN_NON_VOLATILE_STORAGE", TLV_SAVE_IN_NON_VOLATILE_STORAGE, not_supported },
-	{ "RESET_NON_VOLATILE_STORAGE", TLV_RESET_NON_VOLATILE_STORAGE, not_supported },
-	{ "INITIALIZE", TLV_INITIALIZE, not_supported },
-	{ "FAULT_LOG", TLV_FAULT_LOG, not_supported },
-	{ "FAULT_LOG_RESET", TLV_FAULT_LOG_RESET, not_supported },
-	{ "DEFAULT_DATA_SET", TLV_DEFAULT_DATA_SET, do_get_action },
-	{ "CURRENT_DATA_SET", TLV_CURRENT_DATA_SET, do_get_action },
-	{ "PARENT_DATA_SET", TLV_PARENT_DATA_SET, do_get_action },
-	{ "TIME_PROPERTIES_DATA_SET", TLV_TIME_PROPERTIES_DATA_SET, do_get_action },
-	{ "PRIORITY1", TLV_PRIORITY1, do_set_action },
-	{ "PRIORITY2", TLV_PRIORITY2, do_set_action },
-	{ "DOMAIN", TLV_DOMAIN, do_get_action },
-	{ "SLAVE_ONLY", TLV_SLAVE_ONLY, do_get_action },
-	{ "TIME", TLV_TIME, not_supported },
-	{ "CLOCK_ACCURACY", TLV_CLOCK_ACCURACY, do_get_action },
-	{ "UTC_PROPERTIES", TLV_UTC_PROPERTIES, not_supported },
-	{ "TRACEABILITY_PROPERTIES", TLV_TRACEABILITY_PROPERTIES, do_get_action },
-	{ "TIMESCALE_PROPERTIES", TLV_TIMESCALE_PROPERTIES, do_get_action },
-	{ "PATH_TRACE_LIST", TLV_PATH_TRACE_LIST, not_supported },
-	{ "PATH_TRACE_ENABLE", TLV_PATH_TRACE_ENABLE, not_supported },
-	{ "GRANDMASTER_CLUSTER_TABLE", TLV_GRANDMASTER_CLUSTER_TABLE, not_supported },
-	{ "ACCEPTABLE_MASTER_TABLE", TLV_ACCEPTABLE_MASTER_TABLE, not_supported },
-	{ "ACCEPTABLE_MASTER_MAX_TABLE_SIZE", TLV_ACCEPTABLE_MASTER_MAX_TABLE_SIZE, not_supported },
-	{ "ALTERNATE_TIME_OFFSET_ENABLE", TLV_ALTERNATE_TIME_OFFSET_ENABLE, not_supported },
-	{ "ALTERNATE_TIME_OFFSET_NAME", TLV_ALTERNATE_TIME_OFFSET_NAME, not_supported },
-	{ "ALTERNATE_TIME_OFFSET_MAX_KEY", TLV_ALTERNATE_TIME_OFFSET_MAX_KEY, not_supported },
-	{ "ALTERNATE_TIME_OFFSET_PROPERTIES", TLV_ALTERNATE_TIME_OFFSET_PROPERTIES, not_supported },
-	{ "TRANSPARENT_CLOCK_DEFAULT_DATA_SET", TLV_TRANSPARENT_CLOCK_DEFAULT_DATA_SET, not_supported },
-	{ "PRIMARY_DOMAIN", TLV_PRIMARY_DOMAIN, not_supported },
-	{ "TIME_STATUS_NP", TLV_TIME_STATUS_NP, do_get_action },
-	{ "GRANDMASTER_SETTINGS_NP", TLV_GRANDMASTER_SETTINGS_NP, do_set_action },
-	{ "SUBSCRIBE_EVENTS_NP", TLV_SUBSCRIBE_EVENTS_NP, do_set_action },
-	{ "SYNCHRONIZATION_UNCERTAIN_NP", TLV_SYNCHRONIZATION_UNCERTAIN_NP, do_set_action },
+	{ "USER_DESCRIPTION", MID_USER_DESCRIPTION, do_get_action },
+	{ "SAVE_IN_NON_VOLATILE_STORAGE", MID_SAVE_IN_NON_VOLATILE_STORAGE, not_supported },
+	{ "RESET_NON_VOLATILE_STORAGE", MID_RESET_NON_VOLATILE_STORAGE, not_supported },
+	{ "INITIALIZE", MID_INITIALIZE, not_supported },
+	{ "FAULT_LOG", MID_FAULT_LOG, not_supported },
+	{ "FAULT_LOG_RESET", MID_FAULT_LOG_RESET, not_supported },
+	{ "DEFAULT_DATA_SET", MID_DEFAULT_DATA_SET, do_get_action },
+	{ "CURRENT_DATA_SET", MID_CURRENT_DATA_SET, do_get_action },
+	{ "PARENT_DATA_SET", MID_PARENT_DATA_SET, do_get_action },
+	{ "TIME_PROPERTIES_DATA_SET", MID_TIME_PROPERTIES_DATA_SET, do_get_action },
+	{ "PRIORITY1", MID_PRIORITY1, do_set_action },
+	{ "PRIORITY2", MID_PRIORITY2, do_set_action },
+	{ "DOMAIN", MID_DOMAIN, do_get_action },
+	{ "SLAVE_ONLY", MID_SLAVE_ONLY, do_get_action },
+	{ "TIME", MID_TIME, not_supported },
+	{ "CLOCK_ACCURACY", MID_CLOCK_ACCURACY, do_get_action },
+	{ "UTC_PROPERTIES", MID_UTC_PROPERTIES, not_supported },
+	{ "TRACEABILITY_PROPERTIES", MID_TRACEABILITY_PROPERTIES, do_get_action },
+	{ "TIMESCALE_PROPERTIES", MID_TIMESCALE_PROPERTIES, do_get_action },
+	{ "PATH_TRACE_LIST", MID_PATH_TRACE_LIST, not_supported },
+	{ "PATH_TRACE_ENABLE", MID_PATH_TRACE_ENABLE, not_supported },
+	{ "GRANDMASTER_CLUSTER_TABLE", MID_GRANDMASTER_CLUSTER_TABLE, not_supported },
+	{ "ACCEPTABLE_MASTER_TABLE", MID_ACCEPTABLE_MASTER_TABLE, not_supported },
+	{ "ACCEPTABLE_MASTER_MAX_TABLE_SIZE", MID_ACCEPTABLE_MASTER_MAX_TABLE_SIZE, not_supported },
+	{ "ALTERNATE_TIME_OFFSET_ENABLE", MID_ALTERNATE_TIME_OFFSET_ENABLE, do_set_action },
+	{ "ALTERNATE_TIME_OFFSET_NAME", MID_ALTERNATE_TIME_OFFSET_NAME, do_set_action },
+	{ "ALTERNATE_TIME_OFFSET_MAX_KEY", MID_ALTERNATE_TIME_OFFSET_MAX_KEY, not_supported },
+	{ "ALTERNATE_TIME_OFFSET_PROPERTIES", MID_ALTERNATE_TIME_OFFSET_PROPERTIES, do_set_action },
+	{ "MASTER_ONLY", MID_MASTER_ONLY, do_get_action },
+	{ "TRANSPARENT_CLOCK_DEFAULT_DATA_SET", MID_TRANSPARENT_CLOCK_DEFAULT_DATA_SET, not_supported },
+	{ "PRIMARY_DOMAIN", MID_PRIMARY_DOMAIN, not_supported },
+	{ "TIME_STATUS_NP", MID_TIME_STATUS_NP, do_get_action },
+	{ "GRANDMASTER_SETTINGS_NP", MID_GRANDMASTER_SETTINGS_NP, do_set_action },
+	{ "SUBSCRIBE_EVENTS_NP", MID_SUBSCRIBE_EVENTS_NP, do_set_action },
+	{ "SYNCHRONIZATION_UNCERTAIN_NP", MID_SYNCHRONIZATION_UNCERTAIN_NP, do_set_action },
 /* Port management ID values */
-	{ "NULL_MANAGEMENT", TLV_NULL_MANAGEMENT, null_management },
-	{ "CLOCK_DESCRIPTION", TLV_CLOCK_DESCRIPTION, do_get_action },
-	{ "PORT_DATA_SET", TLV_PORT_DATA_SET, do_get_action },
-	{ "LOG_ANNOUNCE_INTERVAL", TLV_LOG_ANNOUNCE_INTERVAL, do_get_action },
-	{ "ANNOUNCE_RECEIPT_TIMEOUT", TLV_ANNOUNCE_RECEIPT_TIMEOUT, do_get_action },
-	{ "LOG_SYNC_INTERVAL", TLV_LOG_SYNC_INTERVAL, do_get_action },
-	{ "VERSION_NUMBER", TLV_VERSION_NUMBER, do_get_action },
-	{ "ENABLE_PORT", TLV_ENABLE_PORT, not_supported },
-	{ "DISABLE_PORT", TLV_DISABLE_PORT, not_supported },
-	{ "UNICAST_NEGOTIATION_ENABLE", TLV_UNICAST_NEGOTIATION_ENABLE, not_supported },
-	{ "UNICAST_MASTER_TABLE", TLV_UNICAST_MASTER_TABLE, not_supported },
-	{ "UNICAST_MASTER_MAX_TABLE_SIZE", TLV_UNICAST_MASTER_MAX_TABLE_SIZE, not_supported },
-	{ "ACCEPTABLE_MASTER_TABLE_ENABLED", TLV_ACCEPTABLE_MASTER_TABLE_ENABLED, not_supported },
-	{ "ALTERNATE_MASTER", TLV_ALTERNATE_MASTER, not_supported },
-	{ "TRANSPARENT_CLOCK_PORT_DATA_SET", TLV_TRANSPARENT_CLOCK_PORT_DATA_SET, not_supported },
-	{ "DELAY_MECHANISM", TLV_DELAY_MECHANISM, do_get_action },
-	{ "LOG_MIN_PDELAY_REQ_INTERVAL", TLV_LOG_MIN_PDELAY_REQ_INTERVAL, do_get_action },
-	{ "PORT_DATA_SET_NP", TLV_PORT_DATA_SET_NP, do_set_action },
-	{ "PORT_STATS_NP", TLV_PORT_STATS_NP, do_get_action },
-	{ "PORT_PROPERTIES_NP", TLV_PORT_PROPERTIES_NP, do_get_action },
+	{ "NULL_MANAGEMENT", MID_NULL_MANAGEMENT, null_management },
+	{ "CLOCK_DESCRIPTION", MID_CLOCK_DESCRIPTION, do_get_action },
+	{ "PORT_DATA_SET", MID_PORT_DATA_SET, do_get_action },
+	{ "LOG_ANNOUNCE_INTERVAL", MID_LOG_ANNOUNCE_INTERVAL, do_get_action },
+	{ "ANNOUNCE_RECEIPT_TIMEOUT", MID_ANNOUNCE_RECEIPT_TIMEOUT, do_get_action },
+	{ "LOG_SYNC_INTERVAL", MID_LOG_SYNC_INTERVAL, do_get_action },
+	{ "VERSION_NUMBER", MID_VERSION_NUMBER, do_get_action },
+	{ "ENABLE_PORT", MID_ENABLE_PORT, not_supported },
+	{ "DISABLE_PORT", MID_DISABLE_PORT, not_supported },
+	{ "UNICAST_NEGOTIATION_ENABLE", MID_UNICAST_NEGOTIATION_ENABLE, not_supported },
+	{ "UNICAST_MASTER_TABLE", MID_UNICAST_MASTER_TABLE, not_supported },
+	{ "UNICAST_MASTER_MAX_TABLE_SIZE", MID_UNICAST_MASTER_MAX_TABLE_SIZE, not_supported },
+	{ "ACCEPTABLE_MASTER_TABLE_ENABLED", MID_ACCEPTABLE_MASTER_TABLE_ENABLED, not_supported },
+	{ "ALTERNATE_MASTER", MID_ALTERNATE_MASTER, not_supported },
+	{ "TRANSPARENT_CLOCK_PORT_DATA_SET", MID_TRANSPARENT_CLOCK_PORT_DATA_SET, not_supported },
+	{ "DELAY_MECHANISM", MID_DELAY_MECHANISM, do_get_action },
+	{ "LOG_MIN_PDELAY_REQ_INTERVAL", MID_LOG_MIN_PDELAY_REQ_INTERVAL, do_get_action },
+	{ "PORT_DATA_SET_NP", MID_PORT_DATA_SET_NP, do_set_action },
+	{ "PORT_PROPERTIES_NP", MID_PORT_PROPERTIES_NP, do_get_action },
+	{ "PORT_STATS_NP", MID_PORT_STATS_NP, do_get_action },
+	{ "PORT_SERVICE_STATS_NP", MID_PORT_SERVICE_STATS_NP, do_get_action },
+	{ "UNICAST_MASTER_TABLE_NP", MID_UNICAST_MASTER_TABLE_NP, do_get_action },
+	{ "PORT_HWCLOCK_NP", MID_PORT_HWCLOCK_NP, do_get_action },
+	{ "POWER_PROFILE_SETTINGS_NP", MID_POWER_PROFILE_SETTINGS_NP, do_set_action },
+	{ "CMLDS_INFO_NP", MID_CMLDS_INFO_NP, do_get_action },
 };
 
 static void do_get_action(struct pmc *pmc, int action, int index, char *str)
@@ -145,11 +172,22 @@ static void do_set_action(struct pmc *pmc, int action, int index, char *str)
 {
 	int cnt, code = idtab[index].code, freq_traceable, leap_59, leap_61,
 		ptp_timescale, time_traceable, utc_off_valid;
+	struct alternate_time_offset_properties atop;
+	struct ieee_c37_238_settings_np pwr;
 	struct grandmaster_settings_np gsn;
 	struct management_tlv_datum mtd;
 	struct subscribe_events_np sen;
 	struct port_ds_np pnp;
-	char onoff[4] = {0};
+	char onoff_port_state[4] = "off";
+	char onoff_time_status[4] = "off";
+	char onoff_parent_data_set[4] = "off";
+	char onoff_cmlds[4] = "off";
+	char display_name[11] = {0};
+	uint64_t jump;
+	uint8_t key;
+	int enable;
+
+	mtd.reserved = 0;
 
 	switch (action) {
 	case GET:
@@ -166,8 +204,8 @@ static void do_set_action(struct pmc *pmc, int action, int index, char *str)
 		return;
 	}
 	switch (code) {
-	case TLV_PRIORITY1:
-	case TLV_PRIORITY2:
+	case MID_PRIORITY1:
+	case MID_PRIORITY2:
 		cnt = sscanf(str,  " %*s %*s %hhu", &mtd.val);
 		if (cnt != 1) {
 			fprintf(stderr, "%s SET needs 1 value\n",
@@ -176,7 +214,51 @@ static void do_set_action(struct pmc *pmc, int action, int index, char *str)
 		}
 		pmc_send_set_action(pmc, code, &mtd, sizeof(mtd));
 		break;
-	case TLV_GRANDMASTER_SETTINGS_NP:
+	case MID_ALTERNATE_TIME_OFFSET_ENABLE:
+		cnt = sscanf(str,  " %*s %*s keyField %hhu enable %d",
+			     &mtd.val, &enable);
+		if (cnt != 2) {
+			fprintf(stderr, "%s SET needs 2 values\n",
+				idtab[index].name);
+			break;
+		}
+		mtd.reserved = enable ? 1 : 0;
+		pmc_send_set_action(pmc, code, &mtd, sizeof(mtd));
+		break;
+	case MID_ALTERNATE_TIME_OFFSET_NAME:
+		cnt = sscanf(str, " %*s %*s "
+			     "keyField       %hhu "
+			     "displayName    %10s ",
+			     &key,
+			     display_name);
+		if (cnt != 2) {
+			fprintf(stderr, "%s SET needs 2 values\n",
+				idtab[index].name);
+			break;
+		}
+		pmc_send_set_aton(pmc, code, key, display_name);
+		break;
+	case MID_ALTERNATE_TIME_OFFSET_PROPERTIES:
+		memset(&atop, 0, sizeof(atop));
+		cnt = sscanf(str, " %*s %*s "
+			     "keyField       %hhu "
+			     "currentOffset  %d "
+			     "jumpSeconds    %d "
+			     "timeOfNextJump %" SCNu64,
+			     &atop.keyField,
+			     &atop.currentOffset,
+			     &atop.jumpSeconds,
+			     &jump);
+		if (cnt != 4) {
+			fprintf(stderr, "%s SET needs 4 values\n",
+				idtab[index].name);
+			break;
+		}
+		atop.timeOfNextJump.seconds_lsb = jump & 0xffffffff;
+		atop.timeOfNextJump.seconds_msb = jump >> 32;
+		pmc_send_set_action(pmc, code, &atop, sizeof(atop));
+		break;
+	case MID_GRANDMASTER_SETTINGS_NP:
 		cnt = sscanf(str, " %*s %*s "
 			     "clockClass              %hhu "
 			     "clockAccuracy           %hhx "
@@ -220,23 +302,40 @@ static void do_set_action(struct pmc *pmc, int action, int index, char *str)
 			gsn.time_flags |= FREQ_TRACEABLE;
 		pmc_send_set_action(pmc, code, &gsn, sizeof(gsn));
 		break;
-	case TLV_SUBSCRIBE_EVENTS_NP:
+	case MID_SUBSCRIBE_EVENTS_NP:
 		memset(&sen, 0, sizeof(sen));
 		cnt = sscanf(str, " %*s %*s "
-			     "duration %hu "
-			     "NOTIFY_PORT_STATE %3s ",
-			     &sen.duration, onoff);
-		if (cnt != 2) {
-			fprintf(stderr, "%s SET needs 2 values\n",
+			     "duration          %hu "
+			     "NOTIFY_PORT_STATE %3s "
+			     "NOTIFY_TIME_SYNC  %3s "
+			     "NOTIFY_PARENT_DATA_SET %3s "
+			     "NOTIFY_CMLDS %3s ",
+			     &sen.duration,
+			     onoff_port_state,
+			     onoff_time_status,
+			     onoff_parent_data_set,
+			     onoff_cmlds);
+		if (cnt < 1) {
+			fprintf(stderr, "%s SET needs at least one value\n",
 				idtab[index].name);
 			break;
 		}
-		if (!strcasecmp(onoff, "on")) {
-			sen.bitmask[0] = 1 << NOTIFY_PORT_STATE;
+		if (!strcasecmp(onoff_port_state, "on")) {
+			event_bitmask_set(sen.bitmask, NOTIFY_PORT_STATE, TRUE);
+		}
+		if (!strcasecmp(onoff_time_status, "on")) {
+			event_bitmask_set(sen.bitmask, NOTIFY_TIME_SYNC, TRUE);
+		}
+		if (!strcasecmp(onoff_parent_data_set, "on")) {
+			event_bitmask_set(sen.bitmask, NOTIFY_PARENT_DATA_SET,
+					  TRUE);
+		}
+		if (!strcasecmp(onoff_cmlds, "on")) {
+			event_bitmask_set(sen.bitmask, NOTIFY_CMLDS, TRUE);
 		}
 		pmc_send_set_action(pmc, code, &sen, sizeof(sen));
 		break;
-	case TLV_SYNCHRONIZATION_UNCERTAIN_NP:
+	case MID_SYNCHRONIZATION_UNCERTAIN_NP:
 		cnt = sscanf(str,  " %*s %*s %hhu", &mtd.val);
 		if (cnt != 1) {
 			fprintf(stderr, "%s SET needs 1 value\n",
@@ -257,7 +356,7 @@ static void do_set_action(struct pmc *pmc, int action, int index, char *str)
 				SYNC_UNCERTAIN_DONTCARE);
 		}
 		break;
-	case TLV_PORT_DATA_SET_NP:
+	case MID_PORT_DATA_SET_NP:
 		cnt = sscanf(str, " %*s %*s "
 			     "neighborPropDelayThresh %u "
 			     "asCapable               %d ",
@@ -269,6 +368,37 @@ static void do_set_action(struct pmc *pmc, int action, int index, char *str)
 			break;
 		}
 		pmc_send_set_action(pmc, code, &pnp, sizeof(pnp));
+		break;
+	case MID_POWER_PROFILE_SETTINGS_NP:
+		cnt = sscanf(str, " %*s %*s "
+			     "version                   %hu "
+			     "grandmasterID             %hx "
+			     "grandmasterTimeInaccuracy %u "
+			     "networkTimeInaccuracy     %u "
+			     "totalTimeInaccuracy       %u ",
+			     &pwr.version,
+			     &pwr.grandmasterID,
+			     &pwr.grandmasterTimeInaccuracy,
+			     &pwr.networkTimeInaccuracy,
+			     &pwr.totalTimeInaccuracy);
+		if (cnt != 5) {
+			fprintf(stderr, "%s SET needs 5 values\n",
+				idtab[index].name);
+			break;
+		}
+		switch (pwr.version) {
+		case IEEE_C37_238_VERSION_NONE:
+		case IEEE_C37_238_VERSION_2011:
+		case IEEE_C37_238_VERSION_2017:
+			pmc_send_set_action(pmc, code, &pwr, sizeof(pwr));
+			break;
+		default:
+			fprintf(stderr, "\nusage: set PROFILE_SETTINGS_NP version "
+				"%hu (none), %hu (2011), or %hu (2017)\n\n",
+				IEEE_C37_238_VERSION_NONE,
+				IEEE_C37_238_VERSION_2011,
+				IEEE_C37_238_VERSION_2017);
+		}
 		break;
 	}
 }
@@ -352,6 +482,7 @@ static void print_help(FILE *fp)
 }
 
 struct pmc {
+	struct config *cfg;
 	UInteger16 sequence_id;
 	UInteger8 boundary_hops;
 	UInteger8 domain_number;
@@ -363,21 +494,29 @@ struct pmc {
 	struct interface *iface;
 	struct fdarray fdarray;
 	int zero_length_gets;
+	int spp;
+	UInteger32 active_key_id;
+	UInteger8 allow_unauth;
 };
 
 struct pmc *pmc_create(struct config *cfg, enum transport_type transport_type,
-		       const char *iface_name, UInteger8 boundary_hops,
-		       UInteger8 domain_number, UInteger8 transport_specific,
+		       const char *iface_name, const char *remote_address,
+		       UInteger8 boundary_hops, UInteger8 domain_number,
+		       UInteger8 transport_specific, UInteger8 allow_unauth,
 		       int zero_datalen)
 {
 	struct pmc *pmc;
+	UInteger32 proc_id;
 
 	pmc = calloc(1, sizeof *pmc);
 	if (!pmc)
 		return NULL;
 
 	if (transport_type == TRANS_UDS) {
-		pmc->port_identity.portNumber = getpid();
+		proc_id = getpid();
+		pmc->port_identity.clockIdentity.id[6] = (proc_id & 0xFF000000) >> 24;
+		pmc->port_identity.clockIdentity.id[7] = (proc_id & 0x00FF0000) >> 16;
+		pmc->port_identity.portNumber = proc_id & 0xFFFF;
 	} else {
 		if (generate_clock_identity(&pmc->port_identity.clockIdentity,
 					    iface_name)) {
@@ -391,6 +530,14 @@ struct pmc *pmc_create(struct config *cfg, enum transport_type transport_type,
 	pmc->boundary_hops = boundary_hops;
 	pmc->domain_number = domain_number;
 	pmc->transport_specific = transport_specific;
+	pmc->cfg = cfg;
+	pmc->spp = config_get_int(cfg, NULL, "spp");
+	pmc->active_key_id = config_get_uint(cfg, NULL, "active_key_id");
+	pmc->allow_unauth = allow_unauth;
+
+	if (sad_readiness_check(pmc->spp, pmc->active_key_id, pmc->cfg)) {
+		goto failed;
+	}
 
 	pmc->transport = transport_create(cfg, transport_type);
 	if (!pmc->transport) {
@@ -398,12 +545,11 @@ struct pmc *pmc_create(struct config *cfg, enum transport_type transport_type,
 		goto failed;
 	}
 
-	pmc->iface = interface_create(iface_name);
+	pmc->iface = interface_create(iface_name, remote_address);
 	if (!pmc->iface) {
 		pr_err("failed to create interface");
 		goto failed;
 	}
-	interface_ensure_tslabel(pmc->iface);
 
 	if (transport_open(pmc->transport, pmc->iface,
 			   &pmc->fdarray, TS_SOFTWARE)) {
@@ -449,7 +595,6 @@ static struct ptp_message *pmc_message(struct pmc *pmc, uint8_t action)
 	msg->header.domainNumber       = pmc->domain_number;
 	msg->header.sourcePortIdentity = pmc->port_identity;
 	msg->header.sequenceId         = pmc->sequence_id++;
-	msg->header.control            = CTL_MANAGEMENT;
 	msg->header.logMessageInterval = 0x7f;
 
 	msg->management.targetPortIdentity = pmc->target;
@@ -464,7 +609,12 @@ static int pmc_send(struct pmc *pmc, struct ptp_message *msg)
 {
 	int err;
 
-	err = msg_pre_send(msg);
+	if (pmc->spp >= 0) {
+		err = sad_append_auth_tlv(pmc->cfg, pmc->spp,
+					  pmc->active_key_id, msg);
+	} else {
+		err = msg_pre_send(msg);
+	}
 	if (err) {
 		pr_err("msg_pre_send failed");
 		return -1;
@@ -481,57 +631,89 @@ static int pmc_tlv_datalen(struct pmc *pmc, int id)
 		return len;
 
 	switch (id) {
-	case TLV_USER_DESCRIPTION:
+	case MID_USER_DESCRIPTION:
 		len += EMPTY_PTP_TEXT;
 		break;
-	case TLV_DEFAULT_DATA_SET:
+	case MID_DEFAULT_DATA_SET:
 		len += sizeof(struct defaultDS);
 		break;
-	case TLV_CURRENT_DATA_SET:
+	case MID_CURRENT_DATA_SET:
 		len += sizeof(struct currentDS);
 		break;
-	case TLV_PARENT_DATA_SET:
+	case MID_PARENT_DATA_SET:
 		len += sizeof(struct parentDS);
 		break;
-	case TLV_TIME_PROPERTIES_DATA_SET:
+	case MID_TIME_PROPERTIES_DATA_SET:
 		len += sizeof(struct timePropertiesDS);
 		break;
-	case TLV_PRIORITY1:
-	case TLV_PRIORITY2:
-	case TLV_DOMAIN:
-	case TLV_SLAVE_ONLY:
-	case TLV_CLOCK_ACCURACY:
-	case TLV_TRACEABILITY_PROPERTIES:
-	case TLV_TIMESCALE_PROPERTIES:
+	case MID_PRIORITY1:
+	case MID_PRIORITY2:
+	case MID_DOMAIN:
+	case MID_SLAVE_ONLY:
+	case MID_CLOCK_ACCURACY:
+	case MID_TRACEABILITY_PROPERTIES:
+	case MID_TIMESCALE_PROPERTIES:
+	case MID_MASTER_ONLY:
+	case MID_SYNCHRONIZATION_UNCERTAIN_NP:
 		len += sizeof(struct management_tlv_datum);
 		break;
-	case TLV_TIME_STATUS_NP:
+	case MID_TIME_STATUS_NP:
 		len += sizeof(struct time_status_np);
 		break;
-	case TLV_GRANDMASTER_SETTINGS_NP:
+	case MID_ALTERNATE_TIME_OFFSET_ENABLE:
+		len += sizeof(struct management_tlv_datum);
+		break;
+	case MID_ALTERNATE_TIME_OFFSET_NAME:
+		len += sizeof(struct alternate_time_offset_name);
+		break;
+	case MID_ALTERNATE_TIME_OFFSET_PROPERTIES:
+		len += sizeof(struct alternate_time_offset_properties);
+		break;
+	case MID_GRANDMASTER_SETTINGS_NP:
 		len += sizeof(struct grandmaster_settings_np);
 		break;
-	case TLV_NULL_MANAGEMENT:
+	case MID_SUBSCRIBE_EVENTS_NP:
+		len += sizeof(struct subscribe_events_np);
 		break;
-	case TLV_CLOCK_DESCRIPTION:
+	case MID_NULL_MANAGEMENT:
+		break;
+	case MID_CLOCK_DESCRIPTION:
 		len += EMPTY_CLOCK_DESCRIPTION;
 		break;
-	case TLV_PORT_DATA_SET:
+	case MID_PORT_DATA_SET:
 		len += sizeof(struct portDS);
 		break;
-	case TLV_PORT_DATA_SET_NP:
+	case MID_PORT_DATA_SET_NP:
 		len += sizeof(struct port_ds_np);
 		break;
-	case TLV_LOG_ANNOUNCE_INTERVAL:
-	case TLV_ANNOUNCE_RECEIPT_TIMEOUT:
-	case TLV_LOG_SYNC_INTERVAL:
-	case TLV_VERSION_NUMBER:
-	case TLV_DELAY_MECHANISM:
-	case TLV_LOG_MIN_PDELAY_REQ_INTERVAL:
+	case MID_PORT_PROPERTIES_NP:
+		len += EMPTY_PORT_PROPERTIES_NP;
+		break;
+	case MID_PORT_STATS_NP:
+		len += sizeof(struct port_stats_np);
+		break;
+	case MID_PORT_SERVICE_STATS_NP:
+		len += sizeof(struct port_service_stats_np);
+		break;
+	case MID_UNICAST_MASTER_TABLE_NP:
+		len += EMPTY_UNICAST_MASTER_TABLE_NP;
+		break;
+	case MID_PORT_HWCLOCK_NP:
+		len += sizeof(struct port_hwclock_np);
+		break;
+	case MID_POWER_PROFILE_SETTINGS_NP:
+		len += sizeof(struct ieee_c37_238_settings_np);
+		break;
+	case MID_LOG_ANNOUNCE_INTERVAL:
+	case MID_ANNOUNCE_RECEIPT_TIMEOUT:
+	case MID_LOG_SYNC_INTERVAL:
+	case MID_VERSION_NUMBER:
+	case MID_DELAY_MECHANISM:
+	case MID_LOG_MIN_PDELAY_REQ_INTERVAL:
 		len += sizeof(struct management_tlv_datum);
 		break;
 	}
-	return len;
+	return len + len % 2;
 }
 
 int pmc_get_transport_fd(struct pmc *pmc)
@@ -567,7 +749,7 @@ int pmc_send_get_action(struct pmc *pmc, int id)
 	extra->tlv = (struct TLV *) msg->management.suffix;
 	msg_tlv_attach(msg, extra);
 
-	if (id == TLV_CLOCK_DESCRIPTION && !pmc->zero_length_gets) {
+	if (id == MID_CLOCK_DESCRIPTION && !pmc->zero_length_gets) {
 		/*
 		 * Make sure the tlv_extra pointers dereferenced in
 		 * mgt_pre_send() do point to something.
@@ -615,10 +797,46 @@ int pmc_send_set_action(struct pmc *pmc, int id, void *data, int datasize)
 	return 0;
 }
 
+int pmc_send_set_aton(struct pmc *pmc, int id, uint8_t key, const char *name)
+{
+	struct alternate_time_offset_name *aton;
+	struct management_tlv *mgt;
+	struct ptp_message *msg;
+	struct tlv_extra *extra;
+	int datasize;
+
+	datasize = sizeof(*aton) + strlen(name);
+	if (datasize % 2) {
+		datasize++;
+	}
+	msg = pmc_message(pmc, SET);
+	if (!msg) {
+		return -1;
+	}
+	extra = msg_tlv_append(msg, sizeof(*mgt) + datasize);
+	if (!extra) {
+		msg_put(msg);
+		return -ENOMEM;
+	}
+	mgt = (struct management_tlv *) extra->tlv;
+	mgt->type = TLV_MANAGEMENT;
+	mgt->length = 2 + datasize;
+	mgt->id = id;
+	aton = (struct alternate_time_offset_name *) mgt->data;
+	aton->keyField = key;
+	ptp_text_set(&aton->displayName, name);
+
+	pmc_send(pmc, msg);
+	msg_put(msg);
+
+	return 0;
+}
+
 struct ptp_message *pmc_recv(struct pmc *pmc)
 {
-	struct ptp_message *msg;
-	int cnt, err;
+	struct ptp_message *msg, *dup = NULL;
+	int cnt, err, spp = pmc->spp;
+	struct tlv_extra *extra;
 
 	msg = msg_allocate();
 	if (!msg) {
@@ -630,6 +848,12 @@ struct ptp_message *pmc_recv(struct pmc *pmc)
 	if (cnt <= 0) {
 		pr_err("recv message failed");
 		goto failed;
+	}
+	if (spp >= 0) {
+		dup = msg_duplicate(msg, 0);
+		if (!dup) {
+			goto failed;
+		}
 	}
 	err = msg_post_recv(msg, cnt);
 	if (err) {
@@ -648,10 +872,40 @@ struct ptp_message *pmc_recv(struct pmc *pmc)
 		       msg_type_string(msg_type(msg)));
 		goto failed;
 	}
-
+	if (pmc->allow_unauth && (msg_type(msg) == SIGNALING ||
+	    (msg_type(msg) == MANAGEMENT && management_action(msg) == RESPONSE))) {
+		spp = -1;
+		TAILQ_FOREACH(extra, &msg->tlv_list, list) {
+			if (extra->tlv->type == TLV_AUTHENTICATION) {
+				spp = pmc->spp;
+			}
+		}
+	}
+	err = sad_process_auth(pmc->cfg, spp, msg, dup);
+	if (err) {
+		if (pmc->allow_unauth == 2) {
+			pr_notice("auth failed but allow_unauth set");
+		} else {
+			switch (err) {
+			case -EBADMSG:
+				pr_err("auth: bad message");
+				break;
+			case -EPROTO:
+				pr_debug("auth: ignoring message");
+				break;
+			}
+			goto failed;
+		}
+	}
+	if (dup) {
+		msg_put(dup);
+	}
 	return msg;
 failed:
 	msg_put(msg);
+	if (dup) {
+		msg_put(dup);
+	}
 	return NULL;
 }
 

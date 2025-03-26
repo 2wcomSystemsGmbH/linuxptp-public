@@ -26,6 +26,8 @@
 #include "notification.h"
 #include "transport.h"
 
+#define POW2_41 ((double)(1ULL << 41))
+
 /* forward declarations */
 struct interface;
 struct clock;
@@ -128,6 +130,13 @@ struct PortIdentity port_identity(struct port *p);
 int port_number(struct port *p);
 
 /**
+ * Obtain a port's name for logging purposes.
+ * @param p        A port instance.
+ * @return         Loggable name of 'p'.
+ */
+const char *port_log_name(struct port *p);
+
+/**
  * Obtain the link status of a port.
  * @param p        A port instance.
  * @return         One (1) if the link is up, zero otherwise.
@@ -219,6 +228,13 @@ struct ptp_message *port_signaling_construct(struct port *p,
  * @return      One of the @ref port_state values.
  */
 enum port_state port_state(struct port *port);
+
+/**
+ * Return  port's delay mechanism method.
+ * @param port	A port instance.
+ * @return 	one of the @ref delay_mechanism values.
+ */
+enum delay_mechanism port_delay_mechanism(struct port *port);
 
 /**
  * Update a port's current state based on a given event.
@@ -342,5 +358,12 @@ enum bmca_select port_bmca(struct port *p);
  * Release all of the memory in the TC transmit descriptor cache.
  */
 void tc_cleanup(void);
+
+/**
+ * Update port's unicast state if port's unicast_state_dirty is true.
+ *
+ * @param port  A port instance.
+ */
+void port_update_unicast_state(struct port *p);
 
 #endif

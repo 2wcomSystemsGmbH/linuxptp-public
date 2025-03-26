@@ -27,16 +27,16 @@
 #include "print.h"
 #include "util.h"
 
-#define PMC_UPDATE_INTERVAL (60 * NS_PER_SEC)
-#define PMC_SUBSCRIBE_DURATION 180	/* 3 minutes */
-/* Note that PMC_SUBSCRIBE_DURATION has to be longer than
- * PMC_UPDATE_INTERVAL otherwise subscription will time out before it is
- * renewed.
- */
+/* The subscription duration needs to be longer than the update interval to be
+   able to process the messages in time without losing notifications. Define
+   a minimum interval to avoid renewing the subscription too frequently. */
+#define UPDATES_PER_SUBSCRIPTION 3
+#define MIN_UPDATE_INTERVAL 10
 
 struct pmc_agent {
 	struct pmc *pmc;
 	uint64_t pmc_last_update;
+	uint64_t update_interval;
 
 	struct defaultDS dds;
 	bool dds_valid;
@@ -56,9 +56,9 @@ static void send_subscription(struct pmc_agent *node)
 	struct subscribe_events_np sen;
 
 	memset(&sen, 0, sizeof(sen));
-	sen.duration = PMC_SUBSCRIBE_DURATION;
-	sen.bitmask[0] = 1 << NOTIFY_PORT_STATE;
-	pmc_send_set_action(node->pmc, TLV_SUBSCRIBE_EVENTS_NP, &sen, sizeof(sen));
+	sen.duration = UPDATES_PER_SUBSCRIPTION * node->update_interval;
+	event_bitmask_set(sen.bitmask, NOTIFY_PORT_STATE, TRUE);
+	pmc_send_set_action(node->pmc, MID_SUBSCRIBE_EVENTS_NP, &sen, sizeof(sen));
 }
 
 static int check_clock_identity(struct pmc_agent *node, struct ptp_message *msg)
@@ -72,14 +72,24 @@ static int check_clock_identity(struct pmc_agent *node, struct ptp_message *msg)
 
 static int is_msg_mgt(struct ptp_message *msg)
 {
+	struct tlv_extra *extra;
 	struct TLV *tlv;
 
 	if (msg_type(msg) != MANAGEMENT)
 		return 0;
 	if (management_action(msg) != RESPONSE)
 		return 0;
-	if (msg_tlv_count(msg) != 1)
+	switch (msg_tlv_count(msg)) {
+	case 1:
+		break;
+	case 2:
+		extra = TAILQ_LAST(&msg->tlv_list, tlv_list);
+		if (extra->tlv->type == TLV_AUTHENTICATION) {
+			break;
+		}
+	default:
 		return 0;
+	}
 	tlv = (struct TLV *) msg->management.suffix;
 	if (tlv->type == TLV_MANAGEMENT)
 		return 1;
@@ -149,7 +159,7 @@ static int run_pmc(struct pmc_agent *node, int timeout, int ds_id,
 		if ((pollfd[0].revents & POLLOUT) &&
 		    !(pollfd[0].revents & (POLLIN|POLLPRI))) {
 			switch (ds_id) {
-			case TLV_SUBSCRIBE_EVENTS_NP:
+			case MID_SUBSCRIBE_EVENTS_NP:
 				send_subscription(node);
 				break;
 			default:
@@ -195,7 +205,7 @@ static int renew_subscription(struct pmc_agent *node, int timeout)
 	struct ptp_message *msg;
 	int res;
 
-	res = run_pmc(node, timeout, TLV_SUBSCRIBE_EVENTS_NP, &msg);
+	res = run_pmc(node, timeout, MID_SUBSCRIBE_EVENTS_NP, &msg);
 	if (is_run_pmc_error(res)) {
 		return run_pmc_err2errno(res);
 	}
@@ -211,7 +221,7 @@ int run_pmc_wait_sync(struct pmc_agent *node, int timeout)
 	int res;
 
 	while (1) {
-		res = run_pmc(node, timeout, TLV_PORT_DATA_SET, &msg);
+		res = run_pmc(node, timeout, MID_PORT_DATA_SET, &msg);
 		if (res <= 0)
 			return res;
 
@@ -232,9 +242,10 @@ int run_pmc_wait_sync(struct pmc_agent *node, int timeout)
 int init_pmc_node(struct config *cfg, struct pmc_agent *node, const char *uds,
 		  pmc_node_recv_subscribed_t *recv_subscribed, void *context)
 {
-	node->pmc = pmc_create(cfg, TRANS_UDS, uds, 0,
+	node->pmc = pmc_create(cfg, TRANS_UDS, uds,
+			       config_get_string(cfg, NULL, "uds_address"), 0,
 			       config_get_int(cfg, NULL, "domainNumber"),
-			       config_get_int(cfg, NULL, "transportSpecific") << 4, 1);
+			       config_get_int(cfg, NULL, "transportSpecific") << 4, 0, 1);
 	if (!node->pmc) {
 		pr_err("failed to create pmc");
 		return -1;
@@ -291,7 +302,7 @@ int pmc_agent_query_dds(struct pmc_agent *node, int timeout)
 	struct defaultDS *dds;
 	int res;
 
-	res = run_pmc(node, timeout, TLV_DEFAULT_DATA_SET, &msg);
+	res = run_pmc(node, timeout, MID_DEFAULT_DATA_SET, &msg);
 	if (is_run_pmc_error(res)) {
 		return run_pmc_err2errno(res);
 	}
@@ -303,16 +314,17 @@ int pmc_agent_query_dds(struct pmc_agent *node, int timeout)
 }
 
 int pmc_agent_query_port_properties(struct pmc_agent *node, int timeout,
-				    unsigned int port, int *state,
-				    int *tstamping, char *iface)
+				    unsigned int port, enum port_state *state,
+				    int *tstamping, int *phc_index, char *iface)
 {
 	struct port_properties_np *ppn;
+	struct port_hwclock_np *phn;
 	struct ptp_message *msg;
 	int res, len;
 
 	pmc_target_port(node->pmc, port);
 	while (1) {
-		res = run_pmc(node, timeout, TLV_PORT_PROPERTIES_NP, &msg);
+		res = run_pmc(node, timeout, MID_PORT_PROPERTIES_NP, &msg);
 		if (is_run_pmc_error(res)) {
 			goto out;
 		}
@@ -331,6 +343,21 @@ int pmc_agent_query_port_properties(struct pmc_agent *node, int timeout,
 		iface[len] = '\0';
 
 		msg_put(msg);
+		break;
+	}
+	while (1) {
+		res = run_pmc(node, timeout, MID_PORT_HWCLOCK_NP, &msg);
+		if (is_run_pmc_error(res)) {
+			goto out;
+		}
+		phn = management_tlv_data(msg);
+		if (phn->portIdentity.portNumber != port) {
+			msg_put(msg);
+			continue;
+		}
+		*phc_index = phn->phc_index;
+
+		msg_put(msg);
 		res = RUN_PMC_OKAY;
 		break;
 	}
@@ -345,7 +372,7 @@ int pmc_agent_query_utc_offset(struct pmc_agent *node, int timeout)
 	struct ptp_message *msg;
 	int res;
 
-	res = run_pmc(node, timeout, TLV_TIME_PROPERTIES_DATA_SET, &msg);
+	res = run_pmc(node, timeout, MID_TIME_PROPERTIES_DATA_SET, &msg);
 	if (is_run_pmc_error(res)) {
 		return run_pmc_err2errno(res);
 	}
@@ -375,9 +402,12 @@ void pmc_agent_set_sync_offset(struct pmc_agent *agent, int offset)
 	agent->sync_offset = offset;
 }
 
-int pmc_agent_subscribe(struct pmc_agent *node, int timeout)
+int pmc_agent_subscribe(struct pmc_agent *node, int timeout, int interval)
 {
 	node->stay_subscribed = true;
+	if (interval < MIN_UPDATE_INTERVAL)
+		interval = MIN_UPDATE_INTERVAL;
+	node->update_interval = interval * NS_PER_SEC;
 	return renew_subscription(node, timeout);
 }
 
@@ -396,7 +426,7 @@ int pmc_agent_update(struct pmc_agent *node)
 	}
 	ts = tp.tv_sec * NS_PER_SEC + tp.tv_nsec;
 
-	if (ts - node->pmc_last_update >= PMC_UPDATE_INTERVAL) {
+	if (ts - node->pmc_last_update >= node->update_interval) {
 		if (node->stay_subscribed) {
 			renew_subscription(node, 0);
 		}
@@ -408,6 +438,22 @@ int pmc_agent_update(struct pmc_agent *node)
 	run_pmc(node, 0, -1, &msg);
 
 	return 0;
+}
+
+int pmc_agent_is_subscribed(struct pmc_agent *agent)
+{
+	struct timespec tp;
+	uint64_t ts;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &tp)) {
+		pr_err("failed to read clock: %m");
+		return 0;
+	}
+	ts = tp.tv_sec * NS_PER_SEC + tp.tv_nsec;
+
+	return agent->pmc_last_update > 0 &&
+		ts - agent->pmc_last_update <= UPDATES_PER_SUBSCRIPTION *
+					       agent->update_interval;
 }
 
 bool pmc_agent_utc_offset_traceable(struct pmc_agent *agent)

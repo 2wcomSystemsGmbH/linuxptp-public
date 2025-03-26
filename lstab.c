@@ -6,6 +6,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 #include "lstab.h"
 
@@ -20,11 +21,15 @@
  * Since there can be at most two leap seconds per year, this allows
  * for at least one hundred years.
  *
- * The table data are available from
+ * Information about leap seconds is published by the IERS in the
+ * bulletin:
+ * https://hpiers.obspm.fr/iers/bul/bulc/bulletinc.dat
  *
- * https://www.ietf.org/timezones/data/leap-seconds.list
+ * The table data is available from
+ * https://hpiers.obspm.fr/iers/bul/bulc/ntp/leap-seconds.list
  *
- * ftp://ftp.nist.gov/pub/time/leap-seconds.list
+ * Backup source:
+ * https://data.iana.org/time-zones/tzdb/leapseconds
  *
  * When updating this table, do not forget to set N_HISTORICAL_LEAPS
  * and the expiration date.
@@ -45,10 +50,12 @@ struct epoch_marker {
 struct lstab {
 	struct epoch_marker lstab[N_LEAPS];
 	uint64_t expiration_utc;
+	const char *leapfile;
+	time_t lsfile_mtime;
 	int length;
 };
 
-static const uint64_t expiration_date_ntp = 3833827200ULL; /* 28 June 2021 */
+static const uint64_t expiration_date_ntp = 3944332800ULL; /* 24 Dec 2024 */
 
 static const uint64_t offset_table[N_LEAPS * 2] = {
 	2272060800ULL,	10,	/* 1 Jan 1972 */
@@ -130,7 +137,7 @@ static int lstab_read(struct lstab *lstab, const char *name)
 		fprintf(stderr, "failed to open '%s' for reading: %m\n", name);
 		return -1;
 	}
-	while (1) {
+	while (index < N_LEAPS) {
 		if (!fgets(buf, sizeof(buf), fp)) {
 			break;
 		}
@@ -144,6 +151,7 @@ static int lstab_read(struct lstab *lstab, const char *name)
 			index++;
 		}
 	}
+	fclose(fp);
 	if (!lstab->expiration_utc) {
 		fprintf(stderr, "missing expiration date in '%s'\n", name);
 		return -1;
@@ -156,6 +164,8 @@ static int lstab_read(struct lstab *lstab, const char *name)
 struct lstab *lstab_create(const char *filename)
 {
 	struct lstab *lstab = calloc(1, sizeof(*lstab));
+	struct stat statbuf;
+	int err;
 
 	if (!lstab) {
 		return NULL;
@@ -165,10 +175,51 @@ struct lstab *lstab_create(const char *filename)
 			free(lstab);
 			return NULL;
 		}
+		lstab->leapfile = filename;
+
+		err = stat(lstab->leapfile, &statbuf);
+		if (err) {
+			fprintf(stderr, "file status failed on %s: %m",
+				lstab->leapfile);
+			free(lstab);
+			return NULL;
+		}
+
+		lstab->lsfile_mtime = statbuf.st_mtim.tv_sec;
+
 	} else {
 		lstab_init(lstab);
 	}
 	return lstab;
+}
+
+int update_leapsecond_table(struct lstab *lstab)
+{
+	struct stat statbuf;
+	int err;
+
+	if (!lstab->leapfile) {
+		return 0;
+	}
+	err = stat(lstab->leapfile, &statbuf);
+	if (err) {
+		fprintf(stderr, "file status failed on %s: %m",
+			lstab->leapfile);
+		return -1;
+	}
+	if (lstab->lsfile_mtime == statbuf.st_mtim.tv_sec) {
+		return 0;
+	}
+	printf("updating leap seconds file\n");
+
+	if (lstab_read(lstab, lstab->leapfile)) {
+		lstab->length = 0;
+		return -1;
+	}
+
+	lstab->lsfile_mtime = statbuf.st_mtim.tv_sec;
+
+	return 0;
 }
 
 void lstab_destroy(struct lstab *lstab)
@@ -181,7 +232,8 @@ enum lstab_result lstab_utc2tai(struct lstab *lstab, uint64_t utctime,
 {
 	int epoch = -1, index, next;
 
-	if (utctime > lstab->expiration_utc) {
+	if (update_leapsecond_table(lstab)) {
+		fprintf(stderr, "Failed to update leap seconds table");
 		return LSTAB_UNKNOWN;
 	}
 
@@ -202,5 +254,10 @@ enum lstab_result lstab_utc2tai(struct lstab *lstab, uint64_t utctime,
 	if (next < lstab->length && utctime == lstab->lstab[next].utc - 1) {
 		return LSTAB_AMBIGUOUS;
 	}
+
+	if (utctime > lstab->expiration_utc) {
+		return LSTAB_EXPIRED;
+	}
+
 	return LSTAB_OK;
 }

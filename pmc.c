@@ -31,6 +31,7 @@
 #include "notification.h"
 #include "pmc_common.h"
 #include "print.h"
+#include "sad.h"
 #include "tlv.h"
 #include "uds.h"
 #include "util.h"
@@ -68,7 +69,7 @@ static void pmc_show_delay_timing(struct slave_delay_timing_record *record,
 		IFMT "delayResponseTimestamp     %" PRId64 ".%09u",
 		record->sequenceId,
 		SHOW_TIMESTAMP(record->delayOriginTimestamp),
-		record->totalCorrectionField << 16,
+		record->totalCorrectionField >> 16,
 		SHOW_TIMESTAMP(record->delayResponseTimestamp));
 }
 
@@ -83,9 +84,27 @@ static void pmc_show_rx_sync_timing(struct slave_rx_sync_timing_record *record,
 		IFMT "syncEventIngressTimestamp  %" PRId64 ".%09u",
 		record->sequenceId,
 		SHOW_TIMESTAMP(record->syncOriginTimestamp),
-		record->totalCorrectionField << 16,
+		record->totalCorrectionField >> 16,
 		record->scaledCumulativeRateOffset,
 		SHOW_TIMESTAMP(record->syncEventIngressTimestamp));
+}
+
+
+static void pmc_show_unicast_master_entry(struct unicast_master_entry *entry,
+				    FILE *fp)
+{
+	fprintf(fp,
+		IFMT "%s %-24s %-34s %-9s %-10hhu 0x%02hhx         0x%04hx                  %-3hhu %-3hhu",
+		entry->selected ? "yes" : "no ",
+		pid2str(&entry->port_identity),
+		portaddr2str(&entry->address),
+		ustate2str(entry->port_state),
+		entry->clock_quality.clockClass,
+		entry->clock_quality.clockAccuracy,
+		entry->clock_quality.offsetScaledLogVariance,
+		entry->priority1,
+		entry->priority2
+	);
 }
 
 static void pmc_show_signaling(struct ptp_message *msg, FILE *fp)
@@ -139,11 +158,19 @@ static void pmc_show_signaling(struct ptp_message *msg, FILE *fp)
 
 static void pmc_show(struct ptp_message *msg, FILE *fp)
 {
+	struct alternate_time_offset_properties *atop;
+	struct alternate_time_offset_name *aton;
+	struct ieee_c37_238_settings_np *pwr;
+	struct unicast_master_table_np *umtn;
 	struct grandmaster_settings_np *gsn;
+	struct port_service_stats_np *pssp;
 	struct mgmt_clock_description *cd;
-	struct subscribe_events_np *sen;
 	struct management_tlv_datum *mtd;
+	struct unicast_master_entry *ume;
+	struct subscribe_events_np *sen;
 	struct port_properties_np *ppn;
+	struct port_hwclock_np *phn;
+	struct cmlds_info_np *cmlds;
 	struct timePropertiesDS *tp;
 	struct management_tlv *mgt;
 	struct time_status_np *tsn;
@@ -153,9 +180,11 @@ static void pmc_show(struct ptp_message *msg, FILE *fp)
 	struct defaultDS *dds;
 	struct currentDS *cds;
 	struct parentDS *pds;
+	uint64_t next_jump;
 	struct portDS *p;
 	struct TLV *tlv;
-	int action;
+	int action, i;
+	uint8_t *buf;
 
 	if (msg_type(msg) == SIGNALING) {
 		pmc_show_signaling(msg, fp);
@@ -171,7 +200,15 @@ static void pmc_show(struct ptp_message *msg, FILE *fp)
 	fprintf(fp, "\t%s seq %hu %s ",
 		pid2str(&msg->header.sourcePortIdentity),
 		msg->header.sequenceId, pmc_action_string(action));
-	if (msg_tlv_count(msg) != 1) {
+	switch (msg_tlv_count(msg)) {
+	case 1:
+		break;
+	case 2:
+		extra = TAILQ_LAST(&msg->tlv_list, tlv_list);
+		if (extra->tlv->type == TLV_AUTHENTICATION) {
+			break;
+		}
+	default:
 		goto out;
 	}
 	extra = TAILQ_FIRST(&msg->tlv_list);
@@ -186,12 +223,12 @@ static void pmc_show(struct ptp_message *msg, FILE *fp)
 		goto out;
 	}
 	mgt = (struct management_tlv *) msg->management.suffix;
-	if (mgt->length == 2 && mgt->id != TLV_NULL_MANAGEMENT) {
+	if (mgt->length == 2 && mgt->id != MID_NULL_MANAGEMENT) {
 		fprintf(fp, "empty-tlv ");
 		goto out;
 	}
 	switch (mgt->id) {
-	case TLV_CLOCK_DESCRIPTION:
+	case MID_CLOCK_DESCRIPTION:
 		cd = &extra->cd;
 		fprintf(fp, "CLOCK_DESCRIPTION "
 			IFMT "clockType             0x%hx"
@@ -215,12 +252,12 @@ static void pmc_show(struct ptp_message *msg, FILE *fp)
 			text2str(cd->userDescription),
 			bin2str(cd->profileIdentity, PROFILE_ID_LEN));
 		break;
-	case TLV_USER_DESCRIPTION:
+	case MID_USER_DESCRIPTION:
 		fprintf(fp, "USER_DESCRIPTION "
 			IFMT "userDescription  %s",
 			text2str(extra->cd.userDescription));
 		break;
-	case TLV_DEFAULT_DATA_SET:
+	case MID_DEFAULT_DATA_SET:
 		dds = (struct defaultDS *) mgt->data;
 		fprintf(fp, "DEFAULT_DATA_SET "
 			IFMT "twoStepFlag             %d"
@@ -244,7 +281,7 @@ static void pmc_show(struct ptp_message *msg, FILE *fp)
 			cid2str(&dds->clockIdentity),
 			dds->domainNumber);
 		break;
-	case TLV_CURRENT_DATA_SET:
+	case MID_CURRENT_DATA_SET:
 		cds = (struct currentDS *) mgt->data;
 		fprintf(fp, "CURRENT_DATA_SET "
 			IFMT "stepsRemoved     %hd"
@@ -253,7 +290,7 @@ static void pmc_show(struct ptp_message *msg, FILE *fp)
 			cds->stepsRemoved, cds->offsetFromMaster / 65536.0,
 			cds->meanPathDelay / 65536.0);
 		break;
-	case TLV_PARENT_DATA_SET:
+	case MID_PARENT_DATA_SET:
 		pds = (struct parentDS *) mgt->data;
 		fprintf(fp, "PARENT_DATA_SET "
 			IFMT "parentPortIdentity                    %s"
@@ -277,7 +314,7 @@ static void pmc_show(struct ptp_message *msg, FILE *fp)
 			pds->grandmasterPriority2,
 			cid2str(&pds->grandmasterIdentity));
 		break;
-	case TLV_TIME_PROPERTIES_DATA_SET:
+	case MID_TIME_PROPERTIES_DATA_SET:
 		tp = (struct timePropertiesDS *) mgt->data;
 		fprintf(fp, "TIME_PROPERTIES_DATA_SET "
 			IFMT "currentUtcOffset      %hd"
@@ -297,32 +334,32 @@ static void pmc_show(struct ptp_message *msg, FILE *fp)
 			tp->flags & FREQ_TRACEABLE ? 1 : 0,
 			tp->timeSource);
 		break;
-	case TLV_PRIORITY1:
+	case MID_PRIORITY1:
 		mtd = (struct management_tlv_datum *) mgt->data;
 		fprintf(fp, "PRIORITY1 "
 			IFMT "priority1 %hhu", mtd->val);
 		break;
-	case TLV_PRIORITY2:
+	case MID_PRIORITY2:
 		mtd = (struct management_tlv_datum *) mgt->data;
 		fprintf(fp, "PRIORITY2 "
 			IFMT "priority2 %hhu", mtd->val);
 		break;
-	case TLV_DOMAIN:
+	case MID_DOMAIN:
 		mtd = (struct management_tlv_datum *) mgt->data;
 		fprintf(fp, "DOMAIN "
 			IFMT "domainNumber %hhu", mtd->val);
 		break;
-	case TLV_SLAVE_ONLY:
+	case MID_SLAVE_ONLY:
 		mtd = (struct management_tlv_datum *) mgt->data;
 		fprintf(fp, "SLAVE_ONLY "
-			IFMT "slaveOnly %d", mtd->val & DDS_SLAVE_ONLY ? 1 : 0);
+			IFMT "slaveOnly %d", mtd->val);
 		break;
-	case TLV_CLOCK_ACCURACY:
+	case MID_CLOCK_ACCURACY:
 		mtd = (struct management_tlv_datum *) mgt->data;
 		fprintf(fp, "CLOCK_ACCURACY "
 			IFMT "clockAccuracy 0x%02hhx", mtd->val);
 		break;
-	case TLV_TRACEABILITY_PROPERTIES:
+	case MID_TRACEABILITY_PROPERTIES:
 		mtd = (struct management_tlv_datum *) mgt->data;
 		fprintf(fp, "TRACEABILITY_PROPERTIES "
 			IFMT "timeTraceable      %d"
@@ -330,12 +367,48 @@ static void pmc_show(struct ptp_message *msg, FILE *fp)
 			mtd->val & TIME_TRACEABLE ? 1 : 0,
 			mtd->val & FREQ_TRACEABLE ? 1 : 0);
 		break;
-	case TLV_TIMESCALE_PROPERTIES:
+	case MID_TIMESCALE_PROPERTIES:
 		mtd = (struct management_tlv_datum *) mgt->data;
 		fprintf(fp, "TIMESCALE_PROPERTIES "
 			IFMT "ptpTimescale %d", mtd->val & PTP_TIMESCALE ? 1 : 0);
 		break;
-	case TLV_TIME_STATUS_NP:
+	case MID_ALTERNATE_TIME_OFFSET_ENABLE:
+		mtd = (struct management_tlv_datum *) mgt->data;
+		fprintf(fp, "ALTERNATE_TIME_OFFSET_ENABLE "
+			IFMT "keyField       %hhu"
+			IFMT "enable         %d",
+			mtd->val,
+			mtd->reserved & 1 ? 1 : 0);
+		break;
+	case MID_ALTERNATE_TIME_OFFSET_NAME:
+		aton = (struct alternate_time_offset_name *) mgt->data;
+		fprintf(fp, "ALTERNATE_TIME_OFFSET_NAME "
+			IFMT "keyField       %hhu"
+			IFMT "displayName    %s",
+			aton->keyField,
+			text2str(&aton->displayName));
+		break;
+	case MID_ALTERNATE_TIME_OFFSET_PROPERTIES:
+		atop = (struct alternate_time_offset_properties *) mgt->data;
+		next_jump = atop->timeOfNextJump.seconds_msb;
+		next_jump <<= 32;
+		next_jump |= atop->timeOfNextJump.seconds_lsb;
+		fprintf(fp, "ALTERNATE_TIME_OFFSET_PROPERTIES "
+			IFMT "keyField       %hhu"
+			IFMT "currentOffset  %d"
+			IFMT "jumpSeconds    %d"
+			IFMT "timeOfNextJump %" PRIu64,
+			atop->keyField,
+			align32(&atop->currentOffset),
+			align32(&atop->jumpSeconds),
+			next_jump);
+		break;
+	case MID_MASTER_ONLY:
+		mtd = (struct management_tlv_datum *) mgt->data;
+		fprintf(fp, "MASTER_ONLY "
+			IFMT "masterOnly %d", mtd->val);
+		break;
+	case MID_TIME_STATUS_NP:
 		tsn = (struct time_status_np *) mgt->data;
 		fprintf(fp, "TIME_STATUS_NP "
 			IFMT "master_offset              %" PRId64
@@ -357,7 +430,7 @@ static void pmc_show(struct ptp_message *msg, FILE *fp)
 			tsn->gmPresent ? "true" : "false",
 			cid2str(&tsn->gmIdentity));
 		break;
-	case TLV_GRANDMASTER_SETTINGS_NP:
+	case MID_GRANDMASTER_SETTINGS_NP:
 		gsn = (struct grandmaster_settings_np *) mgt->data;
 		fprintf(fp, "GRANDMASTER_SETTINGS_NP "
 			IFMT "clockClass              %hhu"
@@ -383,20 +456,26 @@ static void pmc_show(struct ptp_message *msg, FILE *fp)
 			gsn->time_flags & FREQ_TRACEABLE ? 1 : 0,
 			gsn->time_source);
 		break;
-	case TLV_SUBSCRIBE_EVENTS_NP:
+	case MID_SUBSCRIBE_EVENTS_NP:
 		sen = (struct subscribe_events_np *) mgt->data;
 		fprintf(fp, "SUBSCRIBE_EVENTS_NP "
-			IFMT "duration          %hu"
-			IFMT "NOTIFY_PORT_STATE %s",
+			IFMT "duration               %hu"
+			IFMT "NOTIFY_PORT_STATE      %s"
+			IFMT "NOTIFY_TIME_SYNC       %s"
+			IFMT "NOTIFY_PARENT_DATA_SET %s"
+			IFMT "NOTIFY_CMLDS           %s",
 			sen->duration,
-			(sen->bitmask[0] & 1 << NOTIFY_PORT_STATE) ? "on" : "off");
+			event_bitmask_get(sen->bitmask, NOTIFY_PORT_STATE) ? "on" : "off",
+			event_bitmask_get(sen->bitmask, NOTIFY_TIME_SYNC) ? "on" : "off",
+			event_bitmask_get(sen->bitmask, NOTIFY_PARENT_DATA_SET) ? "on" : "off",
+			event_bitmask_get(sen->bitmask, NOTIFY_CMLDS) ? "on" : "off");
 		break;
-	case TLV_SYNCHRONIZATION_UNCERTAIN_NP:
+	case MID_SYNCHRONIZATION_UNCERTAIN_NP:
 		mtd = (struct management_tlv_datum *) mgt->data;
 		fprintf(fp, "SYNCHRONIZATION_UNCERTAIN_NP "
 			IFMT "uncertain %hhu", mtd->val);
 		break;
-	case TLV_PORT_DATA_SET:
+	case MID_PORT_DATA_SET:
 		p = (struct portDS *) mgt->data;
 		if (p->portState > PS_SLAVE) {
 			p->portState = 0;
@@ -411,14 +490,15 @@ static void pmc_show(struct ptp_message *msg, FILE *fp)
 			IFMT "logSyncInterval         %hhd"
 			IFMT "delayMechanism          %hhu"
 			IFMT "logMinPdelayReqInterval %hhd"
-			IFMT "versionNumber           %hhu",
+			IFMT "versionNumber           %u",
 			pid2str(&p->portIdentity), ps_str[p->portState],
 			p->logMinDelayReqInterval, p->peerMeanPathDelay >> 16,
 			p->logAnnounceInterval, p->announceReceiptTimeout,
 			p->logSyncInterval, p->delayMechanism,
-			p->logMinPdelayReqInterval, p->versionNumber);
+			p->logMinPdelayReqInterval,
+			p->versionNumber & MAJOR_VERSION_MASK);
 		break;
-	case TLV_PORT_DATA_SET_NP:
+	case MID_PORT_DATA_SET_NP:
 		pnp = (struct port_ds_np *) mgt->data;
 		fprintf(fp, "PORT_DATA_SET_NP "
 			IFMT "neighborPropDelayThresh %u"
@@ -426,7 +506,7 @@ static void pmc_show(struct ptp_message *msg, FILE *fp)
 			pnp->neighborPropDelayThresh,
 			pnp->asCapable ? 1 : 0);
 		break;
-	case TLV_PORT_PROPERTIES_NP:
+	case MID_PORT_PROPERTIES_NP:
 		ppn = (struct port_properties_np *) mgt->data;
 		if (ppn->port_state > PS_SLAVE) {
 			ppn->port_state = 0;
@@ -441,7 +521,7 @@ static void pmc_show(struct ptp_message *msg, FILE *fp)
 			ts_str(ppn->timestamping),
 			text2str(&ppn->interface));
 		break;
-	case TLV_PORT_STATS_NP:
+	case MID_PORT_STATS_NP:
 		pcp = (struct port_stats_np *) mgt->data;
 		fprintf(fp, "PORT_STATS_NP "
 			IFMT "portIdentity              %s"
@@ -487,32 +567,110 @@ static void pmc_show(struct ptp_message *msg, FILE *fp)
 			pcp->stats.txMsgType[SIGNALING],
 			pcp->stats.txMsgType[MANAGEMENT]);
 		break;
-	case TLV_LOG_ANNOUNCE_INTERVAL:
+	case MID_PORT_SERVICE_STATS_NP:
+		pssp = (struct port_service_stats_np *) mgt->data;
+		fprintf(fp, "PORT_SERVICE_STATS_NP "
+		IFMT "portIdentity              %s"
+		IFMT "announce_timeout          %" PRIu64
+		IFMT "sync_timeout              %" PRIu64
+		IFMT "delay_timeout             %" PRIu64
+		IFMT "unicast_service_timeout   %" PRIu64
+		IFMT "unicast_request_timeout   %" PRIu64
+		IFMT "master_announce_timeout   %" PRIu64
+		IFMT "master_sync_timeout       %" PRIu64
+		IFMT "qualification_timeout     %" PRIu64
+		IFMT "sync_mismatch             %" PRIu64
+		IFMT "followup_mismatch         %" PRIu64,
+		pid2str(&pssp->portIdentity),
+		pssp->stats.announce_timeout,
+		pssp->stats.sync_timeout,
+		pssp->stats.delay_timeout,
+		pssp->stats.unicast_service_timeout,
+		pssp->stats.unicast_request_timeout,
+		pssp->stats.master_announce_timeout,
+		pssp->stats.master_sync_timeout,
+		pssp->stats.qualification_timeout,
+		pssp->stats.sync_mismatch,
+		pssp->stats.followup_mismatch);
+		break;
+	case MID_UNICAST_MASTER_TABLE_NP:
+		umtn = (struct unicast_master_table_np *) mgt->data;
+		fprintf(fp, "UNICAST_MASTER_TABLE_NP "
+			IFMT "actual_table_size %hu",
+			umtn->actual_table_size);
+		buf = (uint8_t *) umtn->unicast_masters;
+		// table header
+		fprintf(fp,
+			IFMT "%s  %-24s %-34s %-9s %s %s %s %s  %s",
+			"BM", "identity", "address", "state",
+			"clockClass", "clockQuality", "offsetScaledLogVariance",
+			"p1", "p2");
+		for (i = 0; i < umtn->actual_table_size; i++) {
+			ume = (struct unicast_master_entry *) buf;
+			pmc_show_unicast_master_entry(ume, fp);
+			buf += sizeof(*ume) + ume->address.addressLength;
+		}
+		break;
+	case MID_PORT_HWCLOCK_NP:
+		phn = (struct port_hwclock_np *) mgt->data;
+		fprintf(fp, "PORT_HWCLOCK_NP "
+			IFMT "portIdentity            %s"
+			IFMT "phcIndex                %d"
+			IFMT "flags                   %hhu",
+			pid2str(&phn->portIdentity),
+			phn->phc_index,
+			phn->flags);
+		break;
+	case MID_POWER_PROFILE_SETTINGS_NP:
+		pwr = (struct ieee_c37_238_settings_np *) mgt->data;
+		fprintf(fp, "POWER_PROFILE_SETTINGS_NP "
+			IFMT "version                   %hu"
+			IFMT "grandmasterID             0x%04hx"
+			IFMT "grandmasterTimeInaccuracy %u"
+			IFMT "networkTimeInaccuracy     %u"
+			IFMT "totalTimeInaccuracy       %u",
+			pwr->version,
+			pwr->grandmasterID,
+			pwr->grandmasterTimeInaccuracy,
+			pwr->networkTimeInaccuracy,
+			pwr->totalTimeInaccuracy);
+		break;
+	case MID_CMLDS_INFO_NP:
+		cmlds = (struct cmlds_info_np *) mgt->data;
+		fprintf(fp, "CMLDS_INFO_NP "
+			IFMT "meanLinkDelay           %" PRId64
+			IFMT "scaledNeighborRateRatio %" PRId32
+			IFMT "as_capable              %" PRIu32,
+			cmlds->meanLinkDelay >> 16,
+			cmlds->scaledNeighborRateRatio,
+			cmlds->as_capable);
+		break;
+	case MID_LOG_ANNOUNCE_INTERVAL:
 		mtd = (struct management_tlv_datum *) mgt->data;
 		fprintf(fp, "LOG_ANNOUNCE_INTERVAL "
 			IFMT "logAnnounceInterval %hhd", mtd->val);
 		break;
-	case TLV_ANNOUNCE_RECEIPT_TIMEOUT:
+	case MID_ANNOUNCE_RECEIPT_TIMEOUT:
 		mtd = (struct management_tlv_datum *) mgt->data;
 		fprintf(fp, "ANNOUNCE_RECEIPT_TIMEOUT "
 			IFMT "announceReceiptTimeout %hhu", mtd->val);
 		break;
-	case TLV_LOG_SYNC_INTERVAL:
+	case MID_LOG_SYNC_INTERVAL:
 		mtd = (struct management_tlv_datum *) mgt->data;
 		fprintf(fp, "LOG_SYNC_INTERVAL "
 			IFMT "logSyncInterval %hhd", mtd->val);
 		break;
-	case TLV_VERSION_NUMBER:
+	case MID_VERSION_NUMBER:
 		mtd = (struct management_tlv_datum *) mgt->data;
 		fprintf(fp, "VERSION_NUMBER "
-			IFMT "versionNumber %hhu", mtd->val);
+			IFMT "versionNumber %hhu", mtd->val & MAJOR_VERSION_MASK);
 		break;
-	case TLV_DELAY_MECHANISM:
+	case MID_DELAY_MECHANISM:
 		mtd = (struct management_tlv_datum *) mgt->data;
 		fprintf(fp, "DELAY_MECHANISM "
 			IFMT "delayMechanism %hhu", mtd->val);
 		break;
-	case TLV_LOG_MIN_PDELAY_REQ_INTERVAL:
+	case MID_LOG_MIN_PDELAY_REQ_INTERVAL:
 		mtd = (struct management_tlv_datum *) mgt->data;
 		fprintf(fp, "LOG_MIN_PDELAY_REQ_INTERVAL "
 			IFMT "logMinPdelayReqInterval %hhd", mtd->val);
@@ -555,7 +713,7 @@ int main(int argc, char *argv[])
 	int ret = 0;
 	char line[1024], *command = NULL, uds_local[MAX_IFNAME_SIZE + 1];
 	enum transport_type transport_type = TRANS_UDP_IPV4;
-	UInteger8 boundary_hops = 1, domain_number = 0, transport_specific = 0;
+	UInteger8 boundary_hops = 1, domain_number = 0, transport_specific = 0, allow_unauth = 0;
 	struct ptp_message *msg;
 	struct option *opts;
 	struct config *cfg;
@@ -669,6 +827,11 @@ int main(int argc, char *argv[])
 	transport_type = config_get_int(cfg, NULL, "network_transport");
 	transport_specific = config_get_int(cfg, NULL, "transportSpecific") << 4;
 	domain_number = config_get_int(cfg, NULL, "domainNumber");
+	allow_unauth = config_get_int(cfg, NULL, "allow_unauth");
+
+	if (sad_create(cfg)) {
+		goto out;
+	}
 
 	if (!iface_name) {
 		if (transport_type == TRANS_UDS) {
@@ -687,8 +850,10 @@ int main(int argc, char *argv[])
 	print_set_syslog(1);
 	print_set_verbose(1);
 
-	pmc = pmc_create(cfg, transport_type, iface_name, boundary_hops,
-			 domain_number, transport_specific, zero_datalen);
+	pmc = pmc_create(cfg, transport_type, iface_name,
+			 config_get_string(cfg, NULL, "uds_address"),
+			 boundary_hops, domain_number, transport_specific,
+			 allow_unauth, zero_datalen);
 	if (!pmc) {
 		fprintf(stderr, "failed to create pmc\n");
 		config_destroy(cfg);
@@ -769,6 +934,7 @@ int main(int argc, char *argv[])
 	msg_cleanup();
 
 out:
+	sad_destroy(cfg);
 	config_destroy(cfg);
 	return ret;
 }

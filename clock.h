@@ -44,6 +44,14 @@ enum clock_type {
 };
 
 /**
+ * Appends the active time zone TLVs to a given message.
+ * @param c          The clock instance.
+ * @param m          The message that will receive the TLVs.
+ * @return           Zero on success, non-zero otherwise.
+ */
+int clock_append_timezones(struct clock *c, struct ptp_message *m);
+
+/**
  * Obtains a reference to the best foreign master of a clock.
  * @param c  The clock instance.
  * @return   A pointer to the data set of the foreign master,
@@ -290,11 +298,25 @@ int clock_slave_only(struct clock *c);
 UInteger8 clock_max_steps_removed(struct clock *c);
 
 /**
+ * Obtain the clock class threshold field from a clock's default data set.
+ * @param c  The clock instance.
+ * @return   Configured clock class threshold value.
+ */
+UInteger8 clock_get_clock_class_threshold(struct clock *c);
+
+/**
  * Obtain the steps removed field from a clock's current data set.
  * @param c  The clock instance.
  * @return   The value of the clock's steps removed field.
  */
 UInteger16 clock_steps_removed(struct clock *c);
+
+/**
+ * Obtain the Time Stamp Processor instance from a clock.
+ * @param c The clock instance.
+ * @return  The Time Stamp Processor associated with the clock.
+ */
+struct tsproc *clock_get_tsproc(struct clock *c);
 
 /**
  * Switch to a new PTP Hardware Clock, for use with the "jbod" mode.
@@ -324,6 +346,13 @@ enum servo_state clock_synchronize(struct clock *c, tmv_t ingress,
  * @param n  The logarithm base two of the sync interval.
  */
 void clock_sync_interval(struct clock *c, int n);
+
+/**
+ * Update the clock leap bits and UTC offset after a leap second
+ * if operating as a grandmaster.
+ * @param c  The clock instance.
+ */
+void clock_update_leap_status(struct clock *c);
 
 /**
  * Obtain a clock's time properties data set.

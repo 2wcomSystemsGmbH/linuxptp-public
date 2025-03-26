@@ -20,6 +20,7 @@
 
 #include "port.h"
 #include "print.h"
+#include "sad.h"
 #include "tc.h"
 #include "tmv.h"
 
@@ -126,8 +127,8 @@ static void tc_complete_request(struct port *q, struct port *p,
 		return;
 	}
 #ifdef DEBUG
-	pr_err("stash delay request from port %hd to %hd seqid %hu residence %lu",
-	       portnum(q), portnum(p), ntohs(req->header.sequenceId),
+	pr_err("stash delay request from %s to %s seqid %hu residence %lu",
+	       q->log_name, p->log_name, ntohs(req->header.sequenceId),
 	       (unsigned long) tmv_to_nanoseconds(residence));
 #endif
 	msg_get(req);
@@ -146,8 +147,8 @@ static void tc_complete_response(struct port *q, struct port *p,
 	int cnt;
 
 #ifdef DEBUG
-	pr_err("complete delay response from port %hd to %hd seqid %hu",
-	       portnum(q), portnum(p), ntohs(resp->header.sequenceId));
+	pr_err("complete delay response from %s to %s seqid %hu",
+	       q->log_name, p->log_name, ntohs(resp->header.sequenceId));
 #endif
 	TAILQ_FOREACH(txd, &q->tc_transmitted, list) {
 		type = tc_match_delay(portnum(p), resp, txd);
@@ -162,9 +163,10 @@ static void tc_complete_response(struct port *q, struct port *p,
 	c1 = net2host64(resp->header.correction);
 	c2 = c1 + tmv_to_TimeInterval(residence);
 	resp->header.correction = host2net64(c2);
+	sad_update_auth_tlv(clock_config(q->clock), resp);
 	cnt = transport_send(p->trp, &p->fda, TRANS_GENERAL, resp);
 	if (cnt <= 0) {
-		pr_err("tc failed to forward response on port %d", portnum(p));
+		pr_err("tc failed to forward response on %s", p->log_name);
 		port_dispatch(p, EV_FAULT_DETECTED, 0);
 	}
 	/* Restore original correction value for next egress port. */
@@ -223,9 +225,10 @@ static void tc_complete_syfup(struct port *q, struct port *p,
 	c2 += tmv_to_TimeInterval(q->peer_delay);
 	c2 += q->asymmetry;
 	fup->header.correction = host2net64(c2);
+	sad_update_auth_tlv(clock_config(q->clock), fup);
 	cnt = transport_send(p->trp, &p->fda, TRANS_GENERAL, fup);
 	if (cnt <= 0) {
-		pr_err("tc failed to forward follow up on port %d", portnum(p));
+		pr_err("tc failed to forward follow up on %s", p->log_name);
 		port_dispatch(p, EV_FAULT_DETECTED, 0);
 	}
 	/* Restore original correction value for next egress port. */
@@ -254,13 +257,12 @@ static void tc_complete(struct port *q, struct port *p,
 
 static int tc_current(struct ptp_message *m, struct timespec now)
 {
-	int64_t t1, t2, tmo;
+	int64_t t1, t2;
 
-	tmo = 1LL * NSEC2SEC;
-	t1 = m->ts.host.tv_sec * NSEC2SEC + m->ts.host.tv_nsec;
-	t2 = now.tv_sec * NSEC2SEC + now.tv_nsec;
+	t1 = m->ts.host.tv_sec * NSEC_PER_SEC + m->ts.host.tv_nsec;
+	t2 = now.tv_sec * NSEC_PER_SEC + now.tv_nsec;
 
-	return t2 - t1 < tmo;
+	return t2 - t1 < NSEC_PER_SEC;
 }
 
 static int tc_fwd_event(struct port *q, struct ptp_message *msg)
@@ -279,8 +281,8 @@ static int tc_fwd_event(struct port *q, struct ptp_message *msg)
 		}
 		cnt = transport_send(p->trp, &p->fda, TRANS_DEFER_EVENT, msg);
 		if (cnt <= 0) {
-			pr_err("failed to forward event from port %hd to %hd",
-				portnum(q), portnum(p));
+			pr_err("failed to forward event from %s to %s",
+				q->log_name, p->log_name);
 			port_dispatch(p, EV_FAULT_DETECTED, 0);
 		}
 	}
@@ -292,8 +294,8 @@ static int tc_fwd_event(struct port *q, struct ptp_message *msg)
 		}
 		err = transport_txts(&p->fda, msg);
 		if (err || !msg_sots_valid(msg)) {
-			pr_err("failed to fetch txts on port %hd to %hd event",
-				portnum(q), portnum(p));
+			pr_err("failed to fetch txts on %s to %s event",
+				q->log_name, p->log_name);
 			port_dispatch(p, EV_FAULT_DETECTED, 0);
 			continue;
 		}
@@ -389,6 +391,7 @@ int tc_forward(struct port *q, struct ptp_message *msg)
 	if (q->tc_spanning_tree && msg_type(msg) == ANNOUNCE) {
 		steps_removed = ntohs(msg->announce.stepsRemoved);
 		msg->announce.stepsRemoved = htons(1 + steps_removed);
+		sad_update_auth_tlv(clock_config(q->clock), msg);
 	}
 
 	for (p = clock_first_port(q->clock); p; p = LIST_NEXT(p, list)) {
@@ -397,8 +400,8 @@ int tc_forward(struct port *q, struct ptp_message *msg)
 		}
 		cnt = transport_send(p->trp, &p->fda, TRANS_GENERAL, msg);
 		if (cnt <= 0) {
-			pr_err("tc failed to forward message on port %d",
-			       portnum(p));
+			pr_err("tc failed to forward message on %s",
+			       p->log_name);
 			port_dispatch(p, EV_FAULT_DETECTED, 0);
 		}
 	}
@@ -452,14 +455,16 @@ int tc_fwd_sync(struct port *q, struct ptp_message *msg)
 		}
 		fup->header.tsmt               = FOLLOW_UP | (msg->header.tsmt & 0xf0);
 		fup->header.ver                = msg->header.ver;
-		fup->header.messageLength      = sizeof(struct follow_up_msg);
+		fup->header.messageLength      = htons(sizeof(struct follow_up_msg));
 		fup->header.domainNumber       = msg->header.domainNumber;
 		fup->header.sourcePortIdentity = msg->header.sourcePortIdentity;
 		fup->header.sequenceId         = msg->header.sequenceId;
-		fup->header.control            = CTL_FOLLOW_UP;
 		fup->header.logMessageInterval = msg->header.logMessageInterval;
 		fup->follow_up.preciseOriginTimestamp = msg->sync.originTimestamp;
+		sad_append_auth_tlv(clock_config(q->clock), q->spp,
+				    q->active_key_id, fup);
 		msg->header.flagField[0]      |= TWO_STEP;
+		sad_update_auth_tlv(clock_config(q->clock), msg);
 	}
 	err = tc_fwd_event(q, msg);
 	if (err) {

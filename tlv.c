@@ -35,6 +35,8 @@
 	(tlv->length < sizeof(struct type) - sizeof(struct TLV))
 
 uint8_t ieee8021_id[3] = { IEEE_802_1_COMMITTEE };
+uint8_t ieeec37_238_id[3] = { IEEE_C37_238_PROFILE };
+uint8_t itu_t_id[3] = { ITU_T_COMMITTEE };
 
 static TAILQ_HEAD(tlv_pool, tlv_extra) tlv_pool =
 	TAILQ_HEAD_INITIALIZER(tlv_pool);
@@ -42,14 +44,14 @@ static TAILQ_HEAD(tlv_pool, tlv_extra) tlv_pool =
 static void scaled_ns_n2h(ScaledNs *sns)
 {
 	sns->nanoseconds_msb = ntohs(sns->nanoseconds_msb);
-	sns->nanoseconds_lsb = net2host64(sns->nanoseconds_msb);
+	sns->nanoseconds_lsb = net2host64(sns->nanoseconds_lsb);
 	sns->fractional_nanoseconds = ntohs(sns->fractional_nanoseconds);
 }
 
 static void scaled_ns_h2n(ScaledNs *sns)
 {
 	sns->nanoseconds_msb = htons(sns->nanoseconds_msb);
-	sns->nanoseconds_lsb = host2net64(sns->nanoseconds_msb);
+	sns->nanoseconds_lsb = host2net64(sns->nanoseconds_lsb);
 	sns->fractional_nanoseconds = htons(sns->fractional_nanoseconds);
 }
 
@@ -67,7 +69,7 @@ static void timestamp_net2host(struct Timestamp *t)
 	NTOHL(t->nanoseconds);
 }
 
-static uint16_t flip16(uint16_t *p)
+static uint16_t flip16(void *p)
 {
 	uint16_t v;
 	memcpy(&v, p, sizeof(v));
@@ -76,7 +78,23 @@ static uint16_t flip16(uint16_t *p)
 	return v;
 }
 
-static int64_t host2net64_unaligned(int64_t *p)
+static void host2net32_unaligned(void *p)
+{
+	int32_t v;
+	memcpy(&v, p, sizeof(v));
+	v = htonl(v);
+	memcpy(p, &v, sizeof(v));
+}
+
+static void net2host32_unaligned(void *p)
+{
+	int32_t v;
+	memcpy(&v, p, sizeof(v));
+	v = ntohl(v);
+	memcpy(p, &v, sizeof(v));
+}
+
+static int64_t host2net64_unaligned(void *p)
 {
 	int64_t v;
 	memcpy(&v, p, sizeof(v));
@@ -85,7 +103,7 @@ static int64_t host2net64_unaligned(int64_t *p)
 	return v;
 }
 
-static int64_t net2host64_unaligned(int64_t *p)
+static int64_t net2host64_unaligned(void *p)
 {
 	int64_t v;
 	memcpy(&v, p, sizeof(v));
@@ -110,26 +128,68 @@ static bool tlv_array_invalid(struct TLV *tlv, size_t base_size, size_t item_siz
 	return (tlv->length == expected_length) ? false : true;
 }
 
+static int alttime_offset_post_recv(struct tlv_extra *extra)
+{
+	struct TLV *tlv = extra->tlv;
+	struct alternate_time_offset_indicator_tlv *atoi =
+		(struct alternate_time_offset_indicator_tlv *) tlv;
+
+	if (tlv->length < sizeof(struct alternate_time_offset_indicator_tlv) +
+	    atoi->displayName.length - sizeof(struct TLV)) {
+		return -EBADMSG;
+	}
+
+	/* Message alignment broken by design. */
+	net2host32_unaligned(&atoi->currentOffset);
+	net2host32_unaligned(&atoi->jumpSeconds);
+	flip16(&atoi->timeOfNextJump.seconds_msb);
+	net2host32_unaligned(&atoi->timeOfNextJump.seconds_lsb);
+
+	return 0;
+}
+
+static void alttime_offset_pre_send(struct tlv_extra *extra)
+{
+	struct alternate_time_offset_indicator_tlv *atoi;
+
+	atoi = (struct alternate_time_offset_indicator_tlv *) extra->tlv;
+
+	/* Message alignment broken by design. */
+	host2net32_unaligned(&atoi->currentOffset);
+	host2net32_unaligned(&atoi->jumpSeconds);
+	flip16(&atoi->timeOfNextJump.seconds_msb);
+	host2net32_unaligned(&atoi->timeOfNextJump.seconds_lsb);
+}
+
 static int mgt_post_recv(struct management_tlv *m, uint16_t data_len,
 			 struct tlv_extra *extra)
 {
-	struct defaultDS *dds;
-	struct currentDS *cds;
-	struct parentDS *pds;
-	struct timePropertiesDS *tp;
-	struct portDS *p;
-	struct port_ds_np *pdsnp;
-	struct time_status_np *tsn;
+	struct alternate_time_offset_properties *atop;
+	struct alternate_time_offset_name *aton;
+	struct ieee_c37_238_settings_np *pwr;
+	struct unicast_master_table_np *umtn;
 	struct grandmaster_settings_np *gsn;
+	struct port_service_stats_np *pssn;
+	struct mgmt_clock_description *cd;
+	struct unicast_master_entry *ume;
 	struct subscribe_events_np *sen;
 	struct port_properties_np *ppn;
+	struct port_hwclock_np *phn;
+	struct timePropertiesDS *tp;
+	struct cmlds_info_np *cmlds;
+	struct time_status_np *tsn;
 	struct port_stats_np *psn;
-	struct mgmt_clock_description *cd;
-	int extra_len = 0, len;
+	int extra_len = 0, i, len;
+	struct port_ds_np *pdsnp;
+	struct currentDS *cds;
+	struct defaultDS *dds;
+	struct parentDS *pds;
+	struct portDS *p;
 	uint8_t *buf;
 	uint16_t u16;
+
 	switch (m->id) {
-	case TLV_CLOCK_DESCRIPTION:
+	case MID_CLOCK_DESCRIPTION:
 		cd = &extra->cd;
 		buf = m->data;
 		len = data_len;
@@ -228,14 +288,14 @@ static int mgt_post_recv(struct management_tlv *m, uint16_t data_len,
 
 		extra_len = buf - m->data;
 		break;
-	case TLV_USER_DESCRIPTION:
+	case MID_USER_DESCRIPTION:
 		if (data_len < sizeof(struct PTPText))
 			goto bad_length;
 		extra->cd.userDescription = (struct PTPText *) m->data;
 		extra_len = sizeof(struct PTPText);
 		extra_len += extra->cd.userDescription->length;
 		break;
-	case TLV_DEFAULT_DATA_SET:
+	case MID_DEFAULT_DATA_SET:
 		if (data_len != sizeof(struct defaultDS))
 			goto bad_length;
 		dds = (struct defaultDS *) m->data;
@@ -243,7 +303,7 @@ static int mgt_post_recv(struct management_tlv *m, uint16_t data_len,
 		dds->clockQuality.offsetScaledLogVariance =
 			ntohs(dds->clockQuality.offsetScaledLogVariance);
 		break;
-	case TLV_CURRENT_DATA_SET:
+	case MID_CURRENT_DATA_SET:
 		if (data_len != sizeof(struct currentDS))
 			goto bad_length;
 		cds = (struct currentDS *) m->data;
@@ -251,7 +311,7 @@ static int mgt_post_recv(struct management_tlv *m, uint16_t data_len,
 		cds->offsetFromMaster = net2host64(cds->offsetFromMaster);
 		cds->meanPathDelay = net2host64(cds->meanPathDelay);
 		break;
-	case TLV_PARENT_DATA_SET:
+	case MID_PARENT_DATA_SET:
 		if (data_len != sizeof(struct parentDS))
 			goto bad_length;
 		pds = (struct parentDS *) m->data;
@@ -264,20 +324,39 @@ static int mgt_post_recv(struct management_tlv *m, uint16_t data_len,
 		pds->grandmasterClockQuality.offsetScaledLogVariance =
 			ntohs(pds->grandmasterClockQuality.offsetScaledLogVariance);
 		break;
-	case TLV_TIME_PROPERTIES_DATA_SET:
+	case MID_TIME_PROPERTIES_DATA_SET:
 		if (data_len != sizeof(struct timePropertiesDS))
 			goto bad_length;
 		tp = (struct timePropertiesDS *) m->data;
 		tp->currentUtcOffset = ntohs(tp->currentUtcOffset);
 		break;
-	case TLV_PORT_DATA_SET:
+	case MID_PORT_DATA_SET:
 		if (data_len != sizeof(struct portDS))
 			goto bad_length;
 		p = (struct portDS *) m->data;
 		p->portIdentity.portNumber = ntohs(p->portIdentity.portNumber);
 		p->peerMeanPathDelay = net2host64(p->peerMeanPathDelay);
 		break;
-	case TLV_TIME_STATUS_NP:
+	case MID_ALTERNATE_TIME_OFFSET_NAME:
+		aton = (struct alternate_time_offset_name *) m->data;
+		if (data_len < sizeof(*aton)) {
+			goto bad_length;
+		}
+		extra_len = sizeof(*aton);
+		extra_len += aton->displayName.length;
+		break;
+	case MID_ALTERNATE_TIME_OFFSET_PROPERTIES:
+		atop = (struct alternate_time_offset_properties *) m->data;
+		if (data_len != sizeof(*atop)) {
+			goto bad_length;
+		}
+		/* Message alignment broken by design. */
+		net2host32_unaligned(&atop->currentOffset);
+		net2host32_unaligned(&atop->jumpSeconds);
+		flip16(&atop->timeOfNextJump.seconds_msb);
+		net2host32_unaligned(&atop->timeOfNextJump.seconds_lsb);
+		break;
+	case MID_TIME_STATUS_NP:
 		if (data_len != sizeof(struct time_status_np))
 			goto bad_length;
 		tsn = (struct time_status_np *) m->data;
@@ -289,7 +368,7 @@ static int mgt_post_recv(struct management_tlv *m, uint16_t data_len,
 		scaled_ns_n2h(&tsn->lastGmPhaseChange);
 		tsn->gmPresent = ntohl(tsn->gmPresent);
 		break;
-	case TLV_GRANDMASTER_SETTINGS_NP:
+	case MID_GRANDMASTER_SETTINGS_NP:
 		if (data_len != sizeof(struct grandmaster_settings_np))
 			goto bad_length;
 		gsn = (struct grandmaster_settings_np *) m->data;
@@ -297,20 +376,20 @@ static int mgt_post_recv(struct management_tlv *m, uint16_t data_len,
 			ntohs(gsn->clockQuality.offsetScaledLogVariance);
 		gsn->utc_offset = ntohs(gsn->utc_offset);
 		break;
-	case TLV_PORT_DATA_SET_NP:
+	case MID_PORT_DATA_SET_NP:
 		if (data_len != sizeof(struct port_ds_np))
 			goto bad_length;
 		pdsnp = (struct port_ds_np *) m->data;
 		pdsnp->neighborPropDelayThresh = ntohl(pdsnp->neighborPropDelayThresh);
 		pdsnp->asCapable = ntohl(pdsnp->asCapable);
 		break;
-	case TLV_SUBSCRIBE_EVENTS_NP:
+	case MID_SUBSCRIBE_EVENTS_NP:
 		if (data_len != sizeof(struct subscribe_events_np))
 			goto bad_length;
 		sen = (struct subscribe_events_np *)m->data;
 		sen->duration = ntohs(sen->duration);
 		break;
-	case TLV_PORT_PROPERTIES_NP:
+	case MID_PORT_PROPERTIES_NP:
 		if (data_len < sizeof(struct port_properties_np))
 			goto bad_length;
 		ppn = (struct port_properties_np *)m->data;
@@ -318,20 +397,105 @@ static int mgt_post_recv(struct management_tlv *m, uint16_t data_len,
 		extra_len = sizeof(struct port_properties_np);
 		extra_len += ppn->interface.length;
 		break;
-	case TLV_PORT_STATS_NP:
+	case MID_PORT_STATS_NP:
 		if (data_len < sizeof(struct port_stats_np))
 			goto bad_length;
 		psn = (struct port_stats_np *)m->data;
 		psn->portIdentity.portNumber =
 			ntohs(psn->portIdentity.portNumber);
+		for (i = 0 ; i < MAX_MESSAGE_TYPES; i++) {
+			psn->stats.rxMsgType[i] = __le64_to_cpu(psn->stats.rxMsgType[i]);
+			psn->stats.txMsgType[i] = __le64_to_cpu(psn->stats.txMsgType[i]);
+		}
 		extra_len = sizeof(struct port_stats_np);
 		break;
-	case TLV_SAVE_IN_NON_VOLATILE_STORAGE:
-	case TLV_RESET_NON_VOLATILE_STORAGE:
-	case TLV_INITIALIZE:
-	case TLV_FAULT_LOG_RESET:
-	case TLV_ENABLE_PORT:
-	case TLV_DISABLE_PORT:
+	case MID_PORT_SERVICE_STATS_NP:
+		if (data_len < sizeof(struct port_service_stats_np))
+			goto bad_length;
+		pssn = (struct port_service_stats_np *)m->data;
+		pssn->portIdentity.portNumber =
+			htons(pssn->portIdentity.portNumber);
+		pssn->stats.announce_timeout =
+			__le64_to_cpu(pssn->stats.announce_timeout);
+		pssn->stats.sync_timeout =
+			__le64_to_cpu(pssn->stats.sync_timeout);
+		pssn->stats.delay_timeout =
+			__le64_to_cpu(pssn->stats.delay_timeout);
+		pssn->stats.unicast_service_timeout =
+			__le64_to_cpu(pssn->stats.unicast_service_timeout);
+		pssn->stats.unicast_request_timeout =
+			__le64_to_cpu(pssn->stats.unicast_request_timeout);
+		pssn->stats.master_announce_timeout =
+			__le64_to_cpu(pssn->stats.master_announce_timeout);
+		pssn->stats.master_sync_timeout =
+			__le64_to_cpu(pssn->stats.master_sync_timeout);
+		pssn->stats.qualification_timeout =
+			__le64_to_cpu(pssn->stats.qualification_timeout);
+		pssn->stats.sync_mismatch =
+			__le64_to_cpu(pssn->stats.sync_mismatch);
+		pssn->stats.followup_mismatch =
+			__le64_to_cpu(pssn->stats.followup_mismatch);
+		extra_len = sizeof(struct port_service_stats_np);
+		break;
+	case MID_UNICAST_MASTER_TABLE_NP:
+		if (data_len < sizeof(struct unicast_master_table_np))
+			goto bad_length;
+		len = sizeof(struct unicast_master_table_np);
+		umtn = (struct unicast_master_table_np *)m->data;
+		umtn->actual_table_size =
+			ntohs(umtn->actual_table_size);
+		buf = (uint8_t *) umtn->unicast_masters;
+		for (i = 0; i < umtn->actual_table_size; i++) {
+			len += sizeof(struct unicast_master_entry);
+			if (data_len < len)
+				goto bad_length;
+			ume = (struct unicast_master_entry *) buf;
+			ume->port_identity.portNumber =
+				ntohs(ume->port_identity.portNumber);
+			ume->clock_quality.offsetScaledLogVariance =
+				ntohs(ume->clock_quality.offsetScaledLogVariance);
+			ume->address.networkProtocol =
+				ntohs(ume->address.networkProtocol);
+			ume->address.addressLength =
+				ntohs(ume->address.addressLength);
+			len += ume->address.addressLength;
+			if (data_len < len)
+				goto bad_length;
+			buf += sizeof(*ume) + ume->address.addressLength;
+		}
+		break;
+	case MID_PORT_HWCLOCK_NP:
+		if (data_len < sizeof(struct port_hwclock_np))
+			goto bad_length;
+		phn = (struct port_hwclock_np *)m->data;
+		phn->portIdentity.portNumber = ntohs(phn->portIdentity.portNumber);
+		phn->phc_index = ntohl(phn->phc_index);
+		extra_len = sizeof(struct port_hwclock_np);
+		break;
+	case MID_POWER_PROFILE_SETTINGS_NP:
+		if (data_len < sizeof(struct ieee_c37_238_settings_np))
+			goto bad_length;
+		pwr = (struct ieee_c37_238_settings_np *)m->data;
+		NTOHS(pwr->version);
+		NTOHS(pwr->grandmasterID);
+		NTOHL(pwr->grandmasterTimeInaccuracy);
+		NTOHL(pwr->networkTimeInaccuracy);
+		NTOHL(pwr->totalTimeInaccuracy);
+		break;
+	case MID_CMLDS_INFO_NP:
+		if (data_len < sizeof(struct cmlds_info_np))
+			goto bad_length;
+		cmlds = (struct cmlds_info_np *)m->data;
+		net2host64_unaligned(&cmlds->meanLinkDelay);
+		NTOHL(cmlds->scaledNeighborRateRatio);
+		NTOHL(cmlds->as_capable);
+		break;
+	case MID_SAVE_IN_NON_VOLATILE_STORAGE:
+	case MID_RESET_NON_VOLATILE_STORAGE:
+	case MID_INITIALIZE:
+	case MID_FAULT_LOG_RESET:
+	case MID_ENABLE_PORT:
+	case MID_DISABLE_PORT:
 		if (data_len != 0)
 			goto bad_length;
 		break;
@@ -349,20 +513,30 @@ bad_length:
 
 static void mgt_pre_send(struct management_tlv *m, struct tlv_extra *extra)
 {
+	struct alternate_time_offset_properties *atop;
+	struct ieee_c37_238_settings_np *pwr;
+	struct unicast_master_table_np *umtn;
+	struct grandmaster_settings_np *gsn;
+	struct port_service_stats_np *pssn;
+	struct mgmt_clock_description *cd;
+	struct unicast_master_entry *ume;
+	struct subscribe_events_np *sen;
+	struct port_properties_np *ppn;
+	struct port_hwclock_np *phn;
+	struct cmlds_info_np *cmlds;
+	struct timePropertiesDS *tp;
+	struct time_status_np *tsn;
+	struct port_stats_np *psn;
+	struct port_ds_np *pdsnp;
 	struct defaultDS *dds;
 	struct currentDS *cds;
 	struct parentDS *pds;
-	struct timePropertiesDS *tp;
 	struct portDS *p;
-	struct port_ds_np *pdsnp;
-	struct time_status_np *tsn;
-	struct grandmaster_settings_np *gsn;
-	struct subscribe_events_np *sen;
-	struct port_properties_np *ppn;
-	struct port_stats_np *psn;
-	struct mgmt_clock_description *cd;
+	uint8_t *buf;
+	int i;
+
 	switch (m->id) {
-	case TLV_CLOCK_DESCRIPTION:
+	case MID_CLOCK_DESCRIPTION:
 		if (extra) {
 			cd = &extra->cd;
 			flip16(cd->clockType);
@@ -371,19 +545,19 @@ static void mgt_pre_send(struct management_tlv *m, struct tlv_extra *extra)
 			flip16(&cd->protocolAddress->addressLength);
 		}
 		break;
-	case TLV_DEFAULT_DATA_SET:
+	case MID_DEFAULT_DATA_SET:
 		dds = (struct defaultDS *) m->data;
 		dds->numberPorts = htons(dds->numberPorts);
 		dds->clockQuality.offsetScaledLogVariance =
 			htons(dds->clockQuality.offsetScaledLogVariance);
 		break;
-	case TLV_CURRENT_DATA_SET:
+	case MID_CURRENT_DATA_SET:
 		cds = (struct currentDS *) m->data;
 		cds->stepsRemoved = htons(cds->stepsRemoved);
 		cds->offsetFromMaster = host2net64(cds->offsetFromMaster);
 		cds->meanPathDelay = host2net64(cds->meanPathDelay);
 		break;
-	case TLV_PARENT_DATA_SET:
+	case MID_PARENT_DATA_SET:
 		pds = (struct parentDS *) m->data;
 		pds->parentPortIdentity.portNumber =
 			htons(pds->parentPortIdentity.portNumber);
@@ -394,16 +568,26 @@ static void mgt_pre_send(struct management_tlv *m, struct tlv_extra *extra)
 		pds->grandmasterClockQuality.offsetScaledLogVariance =
 			htons(pds->grandmasterClockQuality.offsetScaledLogVariance);
 		break;
-	case TLV_TIME_PROPERTIES_DATA_SET:
+	case MID_TIME_PROPERTIES_DATA_SET:
 		tp = (struct timePropertiesDS *) m->data;
 		tp->currentUtcOffset = htons(tp->currentUtcOffset);
 		break;
-	case TLV_PORT_DATA_SET:
+	case MID_PORT_DATA_SET:
 		p = (struct portDS *) m->data;
 		p->portIdentity.portNumber = htons(p->portIdentity.portNumber);
 		p->peerMeanPathDelay = host2net64(p->peerMeanPathDelay);
 		break;
-	case TLV_TIME_STATUS_NP:
+	case MID_ALTERNATE_TIME_OFFSET_NAME:
+		break;
+	case MID_ALTERNATE_TIME_OFFSET_PROPERTIES:
+		atop = (struct alternate_time_offset_properties *) m->data;
+		/* Message alignment broken by design. */
+		host2net32_unaligned(&atop->currentOffset);
+		host2net32_unaligned(&atop->jumpSeconds);
+		flip16(&atop->timeOfNextJump.seconds_msb);
+		host2net32_unaligned(&atop->timeOfNextJump.seconds_lsb);
+		break;
+	case MID_TIME_STATUS_NP:
 		tsn = (struct time_status_np *) m->data;
 		tsn->master_offset = host2net64(tsn->master_offset);
 		tsn->ingress_time = host2net64(tsn->ingress_time);
@@ -413,29 +597,96 @@ static void mgt_pre_send(struct management_tlv *m, struct tlv_extra *extra)
 		scaled_ns_h2n(&tsn->lastGmPhaseChange);
 		tsn->gmPresent = htonl(tsn->gmPresent);
 		break;
-	case TLV_GRANDMASTER_SETTINGS_NP:
+	case MID_GRANDMASTER_SETTINGS_NP:
 		gsn = (struct grandmaster_settings_np *) m->data;
 		gsn->clockQuality.offsetScaledLogVariance =
 			htons(gsn->clockQuality.offsetScaledLogVariance);
 		gsn->utc_offset = htons(gsn->utc_offset);
 		break;
-	case TLV_PORT_DATA_SET_NP:
+	case MID_PORT_DATA_SET_NP:
 		pdsnp = (struct port_ds_np *) m->data;
 		pdsnp->neighborPropDelayThresh = htonl(pdsnp->neighborPropDelayThresh);
 		pdsnp->asCapable = htonl(pdsnp->asCapable);
 		break;
-	case TLV_SUBSCRIBE_EVENTS_NP:
+	case MID_SUBSCRIBE_EVENTS_NP:
 		sen = (struct subscribe_events_np *)m->data;
 		sen->duration = htons(sen->duration);
 		break;
-	case TLV_PORT_PROPERTIES_NP:
+	case MID_PORT_PROPERTIES_NP:
 		ppn = (struct port_properties_np *)m->data;
 		ppn->portIdentity.portNumber = htons(ppn->portIdentity.portNumber);
 		break;
-	case TLV_PORT_STATS_NP:
+	case MID_PORT_STATS_NP:
 		psn = (struct port_stats_np *)m->data;
 		psn->portIdentity.portNumber =
 			htons(psn->portIdentity.portNumber);
+		for (i = 0 ; i < MAX_MESSAGE_TYPES; i++) {
+			psn->stats.rxMsgType[i] = __cpu_to_le64(psn->stats.rxMsgType[i]);
+			psn->stats.txMsgType[i] = __cpu_to_le64(psn->stats.txMsgType[i]);
+		}
+		break;
+	case MID_PORT_SERVICE_STATS_NP:
+		pssn = (struct port_service_stats_np *)m->data;
+		pssn->portIdentity.portNumber =
+			htons(pssn->portIdentity.portNumber);
+		pssn->stats.announce_timeout =
+			__cpu_to_le64(pssn->stats.announce_timeout);
+		pssn->stats.sync_timeout =
+			__cpu_to_le64(pssn->stats.sync_timeout);
+		pssn->stats.delay_timeout =
+			__cpu_to_le64(pssn->stats.delay_timeout);
+		pssn->stats.unicast_service_timeout =
+			__cpu_to_le64(pssn->stats.unicast_service_timeout);
+		pssn->stats.unicast_request_timeout =
+			__cpu_to_le64(pssn->stats.unicast_request_timeout);
+		pssn->stats.master_announce_timeout =
+			__cpu_to_le64(pssn->stats.master_announce_timeout);
+		pssn->stats.master_sync_timeout =
+			__cpu_to_le64(pssn->stats.master_sync_timeout);
+		pssn->stats.qualification_timeout =
+			__cpu_to_le64(pssn->stats.qualification_timeout);
+		pssn->stats.sync_mismatch =
+			__cpu_to_le64(pssn->stats.sync_mismatch);
+		pssn->stats.followup_mismatch =
+			__cpu_to_le64(pssn->stats.followup_mismatch);
+		break;
+	case MID_UNICAST_MASTER_TABLE_NP:
+		umtn = (struct unicast_master_table_np *)m->data;
+		buf = (uint8_t *) umtn->unicast_masters;
+		for (i = 0; i < umtn->actual_table_size; i++) {
+			ume = (struct unicast_master_entry *) buf;
+			// update pointer before the conversion
+			buf += sizeof(*ume) + ume->address.addressLength;
+			ume->port_identity.portNumber =
+				htons(ume->port_identity.portNumber);
+			ume->clock_quality.offsetScaledLogVariance =
+				htons(ume->clock_quality.offsetScaledLogVariance);
+			ume->address.networkProtocol =
+				htons(ume->address.networkProtocol);
+			ume->address.addressLength =
+				htons(ume->address.addressLength);
+		}
+		umtn->actual_table_size =
+			htons(umtn->actual_table_size);
+		break;
+	case MID_PORT_HWCLOCK_NP:
+		phn = (struct port_hwclock_np *)m->data;
+		phn->portIdentity.portNumber = htons(phn->portIdentity.portNumber);
+		phn->phc_index = htonl(phn->phc_index);
+		break;
+	case MID_POWER_PROFILE_SETTINGS_NP:
+		pwr = (struct ieee_c37_238_settings_np *)m->data;
+		HTONS(pwr->version);
+		HTONS(pwr->grandmasterID);
+		HTONL(pwr->grandmasterTimeInaccuracy);
+		HTONL(pwr->networkTimeInaccuracy);
+		HTONL(pwr->totalTimeInaccuracy);
+		break;
+	case MID_CMLDS_INFO_NP:
+		cmlds = (struct cmlds_info_np *)m->data;
+		host2net64_unaligned(&cmlds->meanLinkDelay);
+		HTONL(cmlds->scaledNeighborRateRatio);
+		HTONL(cmlds->as_capable);
 		break;
 	}
 }
@@ -547,7 +798,9 @@ static void nsm_resp_pre_send(struct tlv_extra *extra)
 
 static int org_post_recv(struct organization_tlv *org)
 {
+	struct ieee_c37_238_2017_tlv *p;
 	struct follow_up_info_tlv *f;
+	struct msg_interface_rate_tlv *m;
 
 	if (0 == memcmp(org->id, ieee8021_id, sizeof(ieee8021_id))) {
 		if (org->subtype[0] || org->subtype[1]) {
@@ -568,6 +821,39 @@ static int org_post_recv(struct organization_tlv *org)
 			if (org->length + sizeof(struct TLV) != sizeof(struct msg_interval_req_tlv))
 				goto bad_length;
 		}
+	} else if (0 == memcmp(org->id, itu_t_id, sizeof(itu_t_id))) {
+		if (org->subtype[0] || org->subtype[1]) {
+			return 0;
+		}
+		switch (org->subtype[2]) {
+		case 2:
+			if (org->length + sizeof(struct TLV) != sizeof(struct msg_interface_rate_tlv))
+				goto bad_length;
+			m = (struct msg_interface_rate_tlv *)org;
+			m->interfaceBitPeriod = net2host64(m->interfaceBitPeriod);
+			m->numberOfBitsBeforeTimestamp = ntohs(m->numberOfBitsBeforeTimestamp);
+			m->numberOfBitsAfterTimestamp = ntohs(m->numberOfBitsAfterTimestamp);
+			break;
+		}
+
+	}
+	if (0 == memcmp(org->id, ieeec37_238_id, sizeof(ieeec37_238_id))) {
+		if (org->subtype[0] || org->subtype[1]) {
+			return 0;
+		}
+		switch (org->subtype[2]) {
+		case 1:
+		case 2:
+			/* Layout of 2011 and 2017 messages is compatible. */
+			if (org->length + sizeof(struct TLV) !=
+			    sizeof(struct ieee_c37_238_2017_tlv))
+				goto bad_length;
+			p = (struct ieee_c37_238_2017_tlv *) org;
+			NTOHS(p->grandmasterID);
+			NTOHL(p->reserved1);
+			NTOHL(p->totalTimeInaccuracy);
+			break;
+		}
 	}
 	return 0;
 bad_length:
@@ -576,7 +862,9 @@ bad_length:
 
 static void org_pre_send(struct organization_tlv *org)
 {
+	struct ieee_c37_238_2017_tlv *p;
 	struct follow_up_info_tlv *f;
+	struct msg_interface_rate_tlv *m;
 
 	if (0 == memcmp(org->id, ieee8021_id, sizeof(ieee8021_id))) {
 		if (org->subtype[0] || org->subtype[1]) {
@@ -589,6 +877,33 @@ static void org_pre_send(struct organization_tlv *org)
 			f->gmTimeBaseIndicator = htons(f->gmTimeBaseIndicator);
 			scaled_ns_h2n(&f->lastGmPhaseChange);
 			f->scaledLastGmPhaseChange = htonl(f->scaledLastGmPhaseChange);
+			break;
+		}
+	} else if (0 == memcmp(org->id, itu_t_id, sizeof(itu_t_id))) {
+		if (org->subtype[0] || org->subtype[1]) {
+			return;
+		}
+		switch (org->subtype[2]) {
+		case 2:
+			m = (struct msg_interface_rate_tlv *)org;
+			m->interfaceBitPeriod = host2net64(m->interfaceBitPeriod);
+			m->numberOfBitsBeforeTimestamp = htons(m->numberOfBitsBeforeTimestamp);
+			m->numberOfBitsAfterTimestamp = htons(m->numberOfBitsAfterTimestamp);
+			break;
+		}
+	}
+	if (0 == memcmp(org->id, ieeec37_238_id, sizeof(ieeec37_238_id))) {
+		if (org->subtype[0] || org->subtype[1]) {
+			return;
+		}
+		switch (org->subtype[2]) {
+		case 1:
+		case 2:
+			/* Layout of 2011 and 2017 messages is compatible. */
+			p = (struct ieee_c37_238_2017_tlv *) org;
+			HTONS(p->grandmasterID);
+			HTONL(p->reserved1);
+			HTONL(p->totalTimeInaccuracy);
 			break;
 		}
 	}
@@ -692,6 +1007,26 @@ static void slave_rx_sync_timing_data_pre_send(struct tlv_extra *extra)
 		n_items--;
 		record++;
 	}
+}
+
+static int auth_post_recv(struct tlv_extra *extra)
+{
+	struct authentication_tlv *auth = (struct authentication_tlv *) extra->tlv;
+
+	if (auth->length < sizeof(*auth)) {
+		return -EBADMSG;
+	}
+
+	NTOHL(auth->keyID);
+
+	return 0;
+}
+
+static void auth_pre_send(struct tlv_extra *extra)
+{
+	struct authentication_tlv *auth = (struct authentication_tlv *) extra->tlv;
+
+	HTONL(auth->keyID);
 }
 
 static int unicast_message_type_valid(uint8_t message_type)
@@ -847,6 +1182,8 @@ int tlv_post_recv(struct tlv_extra *extra)
 		}
 		break;
 	case TLV_ALTERNATE_TIME_OFFSET_INDICATOR:
+		result = alttime_offset_post_recv(extra);
+		break;
 	case TLV_AUTHENTICATION_2008:
 	case TLV_AUTHENTICATION_CHALLENGE:
 	case TLV_SECURITY_ASSOCIATION_UPDATE:
@@ -874,7 +1211,10 @@ int tlv_post_recv(struct tlv_extra *extra)
 		break;
 	case TLV_CUMULATIVE_RATE_RATIO:
 	case TLV_PAD:
+		break;
 	case TLV_AUTHENTICATION:
+		result = auth_post_recv(extra);
+		break;
 	default:
 		break;
 	}
@@ -910,7 +1250,10 @@ void tlv_pre_send(struct TLV *tlv, struct tlv_extra *extra)
 		unicast_negotiation_pre_send(tlv);
 		break;
 	case TLV_PATH_TRACE:
+		break;
 	case TLV_ALTERNATE_TIME_OFFSET_INDICATOR:
+		alttime_offset_pre_send(extra);
+		break;
 	case TLV_AUTHENTICATION_2008:
 	case TLV_AUTHENTICATION_CHALLENGE:
 	case TLV_SECURITY_ASSOCIATION_UPDATE:
@@ -938,7 +1281,10 @@ void tlv_pre_send(struct TLV *tlv, struct tlv_extra *extra)
 		break;
 	case TLV_CUMULATIVE_RATE_RATIO:
 	case TLV_PAD:
+		break;
 	case TLV_AUTHENTICATION:
+		auth_pre_send(extra);
+		break;
 	default:
 		break;
 	}

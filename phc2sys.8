@@ -1,4 +1,4 @@
-.TH PHC2SYS 8 "January 2021" "linuxptp"
+.TH PHC2SYS 8 "March 2024" "linuxptp"
 .SH NAME
 phc2sys \- synchronize two or more clocks
 
@@ -120,13 +120,13 @@ Specify the time sink by device (e.g. /dev/ptp1) or interface (e.g. eth1) or
 by  name. The default is CLOCK_REALTIME (the system clock). Not compatible
 with the
 .B \-a
-option.
+option. This option may be given up to 128 times.
 .TP
 .BI \-E " servo"
 Specify which clock servo should be used. Valid values are pi for a PI
 controller, linreg for an adaptive controller using linear regression, and
-ntpshm for the NTP SHM reference clock to allow another process to synchronize
-the local clock.
+ntpshm and refclock_sock for the NTP SHM and chrony SOCK reference clocks
+respectively to allow another process to synchronize the local clock.
 The default is pi.
 .TP
 .BI \-P " kp"
@@ -199,7 +199,12 @@ the direction of the clock synchronization. Not compatible with the
 option.
 .TP
 .BI \-n " domain-number"
-Specify the domain number used by ptp4l. The default is 0.
+Specify the domain number used by ptp4l. This option can be used up to 16 times
+to specify different domain numbers for different sockets specified by the
+.B \-z
+option. The domain numbers are assigned according to the order of the options
+on the command line.
+The default is 0.
 .TP
 .B \-x
 When a leap second is announced, don't apply it in the kernel by stepping the
@@ -209,7 +214,10 @@ clock frequency (unless the
 option is used).
 .TP
 .BI \-z " uds-address"
-Specifies the address of the server's UNIX domain socket.
+Specifies the address of the server's UNIX domain socket. This option can be
+used up to 16 times in the automatic mode to synchronize clocks between multiple
+.B ptp4l
+instances.
 The default is /var/run/ptp4l.
 .TP
 .BI \-l " print-level"
@@ -263,53 +271,13 @@ sets the program options. This is the only used option.
 .SH FILE OPTIONS
 
 .TP
-.B domainNumber
-Specify the domain number used by phc2sys. The default is 0. Same as option
-.B \-n
-(see above).
-
-.TP
-.B kernel_leap
-When a leap second is announced, let the kernel apply it by stepping the
-clock instead of correcting the one-second offset with servo, which would
-correct the one-second offset slowly by changing the clock frequency
-(unless the step_threshold option is set to correct such offset by
-stepping). Relevant only with software time stamping. The default is 1
-(enabled). Same as option
-.B \-x
-(see above).
-
-The maximum logging level of messages which should be printed.
-The default is 6 (LOG_INFO). Same as option
-.B \-l
-(see above).
-
-.TP
-.B logging_level
-The maximum logging level of messages which should be printed.
-The default is 6 (LOG_INFO). Same as option
-.B \-l
-(see above).
-
-.TP
-.B message_tag
-The tag which is added to all messages printed to the standard output
-or system log. The default is an empty string (which cannot be set in
-the configuration file as the option requires an argument).
-Same as option
-.B \-t
-(see above).
-
-.TP
-.B sanity_freq_limit
-The maximum allowed frequency offset between uncorrected clock and the
-system monotonic clock in parts per billion (ppb). This is used as a
-sanity check of the synchronized clock. When a larger offset is measured,
-a warning message will be printed and the servo will be reset. When set
-to 0, the sanity check is disabled. The default is 200000000 (20%).
-Same as option
-.B \-L
-(see above).
+.B active_key_id
+Used in conjunction with \fBspp\fR and \fBsa_file\fR directives to
+specify which key from the \fBspp\fR defined Security Association
+should be used for outbound icv calculations. All Security Assocations
+are read from the file specified by \fBsa_file\fR. Requires \fBspp\fR
+and \fBsa_file\fR directives. Must be in the range of 1 to 2^32-1,
+inclusive. The default is 0 (disabled).
 
 .TP
 .B clock_servo
@@ -324,48 +292,9 @@ Same as option
 (see above).
 
 .TP
-.B transportSpecific
-The transport specific field. Must be in the range 0 to 255.
-The default is 0.
-
-.TP
-.B use_syslog
-Print messages to the system log if enabled.  The default is 1 (enabled).
-Related to option
-.B \-q
-(see above).
-
-.TP
-.B verbose
-Print messages to the standard output if enabled.  The default is 0 (disabled).
-Related to option
-.B \-m
-(see above).
-
-.TP
-.B pi_proportional_const
-Specifies the proportional constant of the PI controller.
-Same as option
-.B \-P
-(see above).
-
-.TP
-.B pi_integral_const
-Specifies the integral constant of the PI controller.
-Same as option
-.B \-I
-(see above).
-
-.TP
-.B step_threshold
-Specifies the step threshold of the servo. It is the maximum offset that
-the servo corrects by changing the clock frequency instead of stepping
-the clock. The clock is stepped on start regardless of the option if the
-offset is larger than 20 microseconds (unless the -F option is used).
-It's  specified  in seconds. The value of 0.0 disables stepping after
-the start. The default is 0.0.
-Same as option
-.B \-S
+.B domainNumber
+Specify the domain number used by phc2sys. The default is 0. Same as option
+.B \-n
 (see above).
 
 .TP
@@ -379,6 +308,39 @@ Same as option
 (see above).
 
 .TP
+.B free-running
+Don't adjust the sink clock if enabled. The default is 0 (disabled).
+
+.TP
+.B kernel_leap
+When a leap second is announced, let the kernel apply it by stepping the
+clock instead of correcting the one-second offset with servo, which would
+correct the one-second offset slowly by changing the clock frequency
+(unless the step_threshold option is set to correct such offset by
+stepping). Relevant only with software time stamping. The default is 1
+(enabled). Same as option
+.B \-x
+(see above).
+
+.TP
+.B logging_level
+The maximum logging level of messages which should be printed.
+The default is 6 (LOG_INFO). Same as option
+.B \-l
+(see above).
+
+.TP
+.B message_tag
+The tag which is added to all messages printed to the standard output
+or system log. If the tag contains the string "{level}", it will be replaced
+with the log level of the message as a number.
+The default is an empty string (which cannot be set in
+the configuration file as the option requires an argument).
+Same as option
+.B \-t
+(see above).
+
+.TP
 .B ntpshm_segment
 The number of the SHM segment used by ntpshm servo.  The default is 0.
 Same as option
@@ -386,11 +348,89 @@ Same as option
 (see above).
 
 .TP
+.B pi_integral_const
+Specifies the integral constant of the PI controller.
+Same as option
+.B \-I
+(see above).
+
+.TP
+.B pi_proportional_const
+Specifies the proportional constant of the PI controller.
+Same as option
+.B \-P
+(see above).
+
+.TP
+.B refclock_sock_address
+The address of the UNIX domain socket to be used by the refclock_sock servo.
+The default is /var/run/refclock.ptp.sock.
+
+.TP
+.B sa_file
+Specifies the location of the file containing Security Associations used
+for immediate security processing of the Authentication TLV in support of
+the optional security mechanism defined in ieee1588-2019 ch 14.16. See
+\fBSECURITY ASSOCIATION OPTIONS\fR for more info on file contents.
+The default is an empty string. (disabled).
+
+.TP
+.B sanity_freq_limit
+The maximum allowed frequency offset between uncorrected clock and the
+system monotonic clock in parts per billion (ppb). This is used as a
+sanity check of the synchronized clock. When a larger offset is measured,
+a warning message will be printed and the servo will be reset. When set
+to 0, the sanity check is disabled. The default is 200000000 (20%).
+Same as option
+.B \-L
+(see above).
+
+.TP
+.B step_threshold
+Specifies the step threshold of the servo. It is the maximum offset that the
+servo corrects by changing the clock frequency (phase when using nullf servo)
+instead of stepping the clock. The clock is stepped on start regardless of the
+option if the offset is larger than 20 microseconds (unless the -F option is
+used). It's specified in seconds. The value of 0.0 disables stepping after the
+start. The default is 0.0.
+Same as option
+.B \-S
+(see above).
+
+.TP
+.B spp
+Specifies the security parameters pointer for the desired security association
+to be used for authentication tlv support. If specified, the port owning the
+spp will attempt to attach (outbound) and check (inbound) authentication tlvs
+for all messages in accordance to the corresponding security association
+sourced via the \fBsa_file\fR directive. Not compatible with one step ports.
+Must be in the range of -1 to 255, inclusive. The default is -1 (disabled).
+
+.TP
+.B transportSpecific
+The transport specific field. Must be in the range 0 to 255.
+The default is 0.
+
+.TP
 .B uds_address
 Specifies the address of the server's UNIX domain socket. The default
 is /var/run/ptp4
 Same as option
 .B \-z
+(see above).
+
+.TP
+.B use_syslog
+Print messages to the system log if enabled.  The default is 1 (enabled).
+Related to option
+.B \-q
+(see above).
+
+.TP
+.B verbose
+Print messages to the standard output if enabled.  The default is 0 (disabled).
+Related to option
+.B \-m
 (see above).
 
 .SH TIME SCALE USAGE
@@ -461,7 +501,7 @@ does not wait for
 .BR ptp4l .
 
 .RS
-\f(CWphc2sys \-c /dev/ptp0 \-s CLOCK_REALTIME \-O 35\fP
+\f(CWphc2sys \-c /dev/ptp0 \-s CLOCK_REALTIME \-O 37\fP
 .RE
 
 The host is in client mode, system clock is synchronized from PTP clock,
@@ -480,7 +520,7 @@ provided on command line
 does not wait.
 
 .RS
-\f(CWphc2sys \-s eth0 \-O \-35\fP
+\f(CWphc2sys \-s eth0 \-O \-37\fP
 .RE
 
 .SH WARNING

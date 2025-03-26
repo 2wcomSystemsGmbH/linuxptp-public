@@ -33,6 +33,12 @@ enum delay_mechanism {
 
 	/** Peer delay mechanism. */
 	DM_P2P,
+
+	/** Peer delay as measured by CMLDS. */
+	DM_COMMON_P2P,
+
+	/** No Delay Mechanism. */
+	DM_NO_MECHANISM = 0xFE,
 };
 
 #endif

@@ -66,6 +66,22 @@ static int hwts_init(int fd, const char *device, int rx_filter,
 
 	init_ifreq(&ifreq, &cfg, device);
 
+	/* Test if VLAN over bond is supported. */
+	cfg.flags = HWTSTAMP_FLAG_BONDED_PHC_INDEX;
+	err = ioctl(fd, SIOCGHWTSTAMP, &ifreq);
+	if (err < 0) {
+		/*
+		 * Fall back without flag if user runs new build on old kernel
+		 * or if driver does not support SIOCGHWTSTAMP ioctl.
+		 */
+		if (errno == EINVAL || errno == EOPNOTSUPP) {
+			init_ifreq(&ifreq, &cfg, device);
+		} else {
+			pr_err("ioctl SIOCGHWTSTAMP failed: %m");
+			return err;
+		}
+	}
+
 	switch (sk_hwts_filter_mode) {
 	case HWTS_FILTER_CHECK:
 		err = ioctl(fd, SIOCGHWTSTAMP, &ifreq);
@@ -199,6 +215,80 @@ failed:
 	memset(sk_info, 0, sizeof(struct sk_ts_info));
 	return -1;
 }
+
+int sk_get_if_info(const char *name, struct sk_if_info *if_info)
+{
+#ifdef ETHTOOL_GLINKSETTINGS
+	struct ifreq ifr;
+	int fd, err;
+
+	struct {
+		struct ethtool_link_settings req;
+		/*
+		 * link_mode_data consists of supported[], advertising[],
+		 * lp_advertising[] with size up to 127 each.
+		 * The actual size is provided by the kernel.
+		 */
+		__u32 link_mode_data[3 * 127];
+	} ecmd;
+
+	memset(&ifr, 0, sizeof(ifr));
+	memset(&ecmd, 0, sizeof(ecmd));
+
+	fd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (fd < 0) {
+		goto failed;
+	}
+
+	ecmd.req.cmd = ETHTOOL_GLINKSETTINGS;
+
+	strncpy(ifr.ifr_name, name, IFNAMSIZ - 1);
+	ifr.ifr_data = (char *) &ecmd;
+
+	/* Handshake with kernel to determine number of words for link
+	 * mode bitmaps. When requested number of bitmap words is not
+	 * the one expected by kernel, the latter returns the integer
+	 * opposite of what it is expecting. We request length 0 below
+	 * (aka. invalid bitmap length) to get this info.
+	 */
+	err = ioctl(fd, SIOCETHTOOL, &ifr);
+	if (err < 0) {
+		pr_err("ioctl SIOCETHTOOL failed: %m");
+		close(fd);
+		goto failed;
+	}
+
+	if (ecmd.req.link_mode_masks_nwords >= 0 ||
+			ecmd.req.cmd != ETHTOOL_GLINKSETTINGS) {
+		close(fd);
+		goto failed;
+	}
+	ecmd.req.link_mode_masks_nwords = -ecmd.req.link_mode_masks_nwords;
+
+	err = ioctl(fd, SIOCETHTOOL, &ifr);
+	if (err < 0) {
+		pr_err("ioctl SIOCETHTOOL failed: %m");
+		close(fd);
+		goto failed;
+	}
+
+	close(fd);
+
+	/* copy the necessary data to sk_info */
+	memset(if_info, 0, sizeof(struct sk_if_info));
+	if_info->valid = 1;
+	if_info->speed = ecmd.req.speed;
+
+	/* Megabits per second converted to attoseconds per bit */
+	if_info->iface_bit_period = (1000000000000ULL/if_info->speed);
+	return 0;
+failed:
+#endif
+	/* clear data and ensure it is not marked valid */
+	memset(if_info, 0, sizeof(struct sk_if_info));
+	return -1;
+}
+
 
 static int sk_interface_guidaddr(const char *name, unsigned char *guid)
 {
@@ -349,12 +439,19 @@ int sk_receive(int fd, void *buf, int buflen,
 	if (flags == MSG_ERRQUEUE) {
 		struct pollfd pfd = { fd, sk_events, 0 };
 		res = poll(&pfd, 1, sk_tx_timeout);
-		if (res < 1) {
-			pr_err(res ? "poll for tx timestamp failed: %m" :
-			             "timed out while polling for tx timestamp");
-			pr_err("increasing tx_timestamp_timeout may correct "
-			       "this issue, but it is likely caused by a driver bug");
+		/* Retry once on EINTR to avoid logging errors before exit */
+		if (res < 0 && errno == EINTR)
+			res = poll(&pfd, 1, sk_tx_timeout);
+		if (res < 0) {
+			pr_err("poll for tx timestamp failed: %m");
 			return -errno;
+		} else if (!res) {
+			pr_err("timed out while polling for tx timestamp");
+			pr_err("increasing tx_timestamp_timeout or increasing "
+			       "kworker priority may correct this issue, "
+			       "but a driver bug likely causes it");
+			errno = ETIME;
+			return -1;
 		} else if (!(pfd.revents & sk_revents)) {
 			pr_err("poll for tx timestamp woke up on non ERR event");
 			return -1;
@@ -391,7 +488,7 @@ int sk_receive(int fd, void *buf, int buflen,
 
 	if (!ts) {
 		memset(&hwts->ts, 0, sizeof(hwts->ts));
-		return cnt < 1 ? -errno : cnt;
+		return cnt < 0 ? -errno : cnt;
 	}
 
 	switch (hwts->type) {
@@ -407,7 +504,21 @@ int sk_receive(int fd, void *buf, int buflen,
 		hwts->ts = timespec_to_tmv(ts[1]);
 		break;
 	}
-	return cnt < 1 ? -errno : cnt;
+	return cnt < 0 ? -errno : cnt;
+}
+
+int sk_get_error(int fd)
+{
+	socklen_t len;
+	int error;
+
+	len = sizeof (error);
+	if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &len) < 0) {
+		pr_err("getsockopt SO_ERROR failed: %m");
+		return -1;
+	}
+
+	return error;
 }
 
 int sk_set_priority(int fd, int family, uint8_t dscp)
@@ -447,9 +558,10 @@ int sk_set_priority(int fd, int family, uint8_t dscp)
 }
 
 int sk_timestamping_init(int fd, const char *device, enum timestamp_type type,
-			 enum transport_type transport)
+			 enum transport_type transport, int vclock)
 {
 	int err, filter1, filter2 = 0, flags, tx_type = HWTSTAMP_TX_ON;
+	struct so_timestamping timestamping;
 
 	switch (type) {
 	case TS_SOFTWARE:
@@ -509,8 +621,14 @@ int sk_timestamping_init(int fd, const char *device, enum timestamp_type type,
 			return err;
 	}
 
+	if (vclock >= 0)
+		flags |= SOF_TIMESTAMPING_BIND_PHC;
+
+	timestamping.flags = flags;
+	timestamping.bind_phc = vclock;
+
 	if (setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPING,
-		       &flags, sizeof(flags)) < 0) {
+		       &timestamping, sizeof(timestamping)) < 0) {
 		pr_err("ioctl SO_TIMESTAMPING failed: %m");
 		return -1;
 	}

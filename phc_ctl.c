@@ -48,8 +48,6 @@
 #include "util.h"
 #include "version.h"
 
-#define NSEC2SEC 1000000000.0
-
 /* trap the alarm signal so that pause() will wake up on receipt */
 static void handle_alarm(int s)
 {
@@ -68,7 +66,7 @@ static void double_to_timespec(double d, struct timespec *ts)
 	 * value by our fractional component. This results in a correct
 	 * timespec from the double representing seconds.
 	 */
-	ts->tv_nsec = (long)(NSEC2SEC * fraction);
+	ts->tv_nsec = (long)(NSEC_PER_SEC * fraction);
 }
 
 static int install_handler(int signum, void(*handler)(int))
@@ -90,26 +88,6 @@ static int install_handler(int signum, void(*handler)(int))
 	return 0;
 }
 
-static int64_t calculate_offset(struct timespec *ts1,
-				      struct timespec *rt,
-				      struct timespec *ts2)
-{
-	int64_t interval;
-	int64_t offset;
-
-#define NSEC_PER_SEC 1000000000ULL
-	/* calculate interval between clock realtime */
-	interval = (ts2->tv_sec - ts1->tv_sec) * NSEC_PER_SEC;
-	interval += ts2->tv_nsec - ts1->tv_nsec;
-
-	/* assume PHC read occured half way between CLOCK_REALTIME reads */
-
-	offset = (rt->tv_sec - ts1->tv_sec) * NSEC_PER_SEC;
-	offset += (rt->tv_nsec - ts1->tv_nsec) - (interval / 2);
-
-	return offset;
-}
-
 static void usage(const char *progname)
 {
 	fprintf(stderr,
@@ -128,13 +106,14 @@ static void usage(const char *progname)
 		" specify commands with arguments. Can specify multiple\n"
 		" commands to be executed in order. Seconds are read as\n"
 		" double precision floating point values.\n"
-		"  set  [seconds]  set PHC time (defaults to time on CLOCK_REALTIME)\n"
-		"  get             get PHC time\n"
-		"  adj  <seconds>  adjust PHC time by offset\n"
-		"  freq [ppb]      adjust PHC frequency (default returns current offset)\n"
-		"  cmp             compare PHC offset to CLOCK_REALTIME\n"
-		"  caps            display device capabilities (default if no command given)\n"
-		"  wait <seconds>  pause between commands\n"
+		"  set   [seconds]  set PHC time (defaults to time on CLOCK_REALTIME)\n"
+		"  get              get PHC time\n"
+		"  adj   <seconds>  adjust PHC time by offset\n"
+		"  freq  [ppb]      adjust PHC frequency (default returns current offset)\n"
+		"  phase <seconds>  pass offset to PHC phase control keyword\n"
+		"  cmp              compare PHC offset to CLOCK_REALTIME\n"
+		"  caps             display device capabilities (default if no command given)\n"
+		"  wait <seconds>   pause between commands\n"
 		"\n",
 		progname);
 }
@@ -250,7 +229,7 @@ static int do_adj(clockid_t clkid, int cmdc, char *cmdv[])
 		return -2;
 	}
 
-	nsecs = (int64_t)(NSEC2SEC * time_arg);
+	nsecs = (int64_t)(NSEC_PER_SEC * time_arg);
 
 	clockadj_init(clkid);
 	clockadj_step(clkid, nsecs);
@@ -270,14 +249,14 @@ static int do_freq(clockid_t clkid, int cmdc, char *cmdv[])
 
 	if (cmdc < 1 || name_is_a_command(cmdv[0])) {
 		ppb = clockadj_get_freq(clkid);
-		pr_err("clock frequency offset is %lfppb", ppb);
+		pr_notice("clock frequency offset is %lfppb", ppb);
 
 		/* no argument was used */
 		return 0;
 	}
 
 	/* parse the double ppb argument */
-	r = get_ranged_double(cmdv[0], &ppb, -NSEC2SEC, NSEC2SEC);
+	r = get_ranged_double(cmdv[0], &ppb, -NSEC_PER_SEC, NSEC_PER_SEC);
 	switch (r) {
 	case PARSED_OK:
 		break;
@@ -293,9 +272,48 @@ static int do_freq(clockid_t clkid, int cmdc, char *cmdv[])
 	}
 
 	clockadj_set_freq(clkid, ppb);
-	pr_err("adjusted clock frequency offset to %lfppb", ppb);
+	pr_notice("adjusted clock frequency offset to %lfppb", ppb);
 
 	/* consumed one argument to determine the frequency adjustment value */
+	return 1;
+}
+
+static int do_phase(clockid_t clkid, int cmdc, char *cmdv[])
+{
+	double offset_arg;
+	long nsecs;
+	enum parser_result r;
+
+	if (cmdc < 1 || name_is_a_command(cmdv[0])) {
+		pr_err("phase: missing required time argument");
+		return -2;
+	}
+
+	/* parse the double time offset argument */
+	r = get_ranged_double(cmdv[0], &offset_arg, -DBL_MAX, DBL_MAX);
+	switch (r) {
+	case PARSED_OK:
+		break;
+	case MALFORMED:
+		pr_err("phase: '%s' is not a valid double", cmdv[0]);
+		return -2;
+	case OUT_OF_RANGE:
+		pr_err("phase: '%s' is out of range.", cmdv[0]);
+		return -2;
+	default:
+		pr_err("phase: couldn't process '%s'", cmdv[0]);
+		return -2;
+	}
+
+	nsecs = (long)(NSEC_PER_SEC * offset_arg);
+
+	clockadj_init(clkid);
+	clockadj_set_phase(clkid, nsecs);
+
+	pr_notice("offset of %lf seconds provided to PHC phase control keyword",
+		  offset_arg);
+
+	/* phase offset always consumes one argument */
 	return 1;
 }
 
@@ -322,47 +340,56 @@ static int do_caps(clockid_t clkid, int cmdc, char *cmdv[])
 		"  %d programmable periodic signals\n"
 		"  %d configurable input/output pins\n"
 		"  %s pulse per second support\n"
-		"  %s cross timestamping support\n",
+		"  %s cross timestamping support\n"
+		"  %s adjust phase support\n",
 		caps.max_adj,
 		caps.n_alarm,
 		caps.n_ext_ts,
 		caps.n_per_out,
 		caps.n_pins,
 		caps.pps ? "has" : "doesn't have",
-		caps.cross_timestamping ? "has" : "doesn't have");
+		caps.cross_timestamping ? "has" : "doesn't have",
+		#ifdef HAVE_PTP_CAPS_ADJUST_PHASE
+		caps.adjust_phase ? "has" : "doesn't have"
+		#else
+		"no information regarding"
+		#endif
+		);
+
+	if (caps.max_phase_adj)
+		pr_notice("  %d maximum offset adjustment (ns)\n", caps.max_phase_adj);
+
 	return 0;
 }
 
 static int do_cmp(clockid_t clkid, int cmdc, char *cmdv[])
 {
-	struct timespec ts, rta, rtb;
-	int64_t sys_offset, delay = 0, offset;
+	int64_t sys_offset, delay;
 	uint64_t sys_ts;
-	int method;
+	int method, fd;
 
-	method = sysoff_probe(CLOCKID_TO_FD(clkid), 9);
+#define N_SAMPLES 9
 
-	if (method >= 0 && sysoff_measure(CLOCKID_TO_FD(clkid), method, 9,
+	fd = CLOCKID_TO_FD(clkid);
+
+	method = sysoff_probe(fd, N_SAMPLES);
+
+	if (method >= 0 && sysoff_measure(fd, method, N_SAMPLES,
 					  &sys_offset, &sys_ts, &delay) >= 0) {
-		pr_notice( "offset from CLOCK_REALTIME is %"PRId64"ns\n",
-			sys_offset);
+		pr_notice("offset from CLOCK_REALTIME is %"PRId64"ns\n",
+			  sys_offset);
 		return 0;
 	}
 
-	memset(&ts, 0, sizeof(ts));
-	memset(&ts, 0, sizeof(rta));
-	memset(&ts, 0, sizeof(rtb));
-	if (clock_gettime(CLOCK_REALTIME, &rta) ||
-	    clock_gettime(clkid, &ts) ||
-	    clock_gettime(CLOCK_REALTIME, &rtb)) {
-		pr_err("cmp: failed clock reads: %s\n",
-			strerror(errno));
+	if (clockadj_compare(clkid, CLOCK_REALTIME, N_SAMPLES,
+			     &sys_offset, &sys_ts, &delay)) {
+		pr_err("cmp: failed to compare clocks: %s\n",
+		       strerror(errno));
 		return -1;
 	}
 
-	offset = calculate_offset(&rta, &ts, &rtb);
-	pr_notice( "offset from CLOCK_REALTIME is approximately %"PRId64"ns\n",
-		offset);
+	pr_notice("offset from CLOCK_REALTIME is approximately %"PRId64"ns\n",
+		  sys_offset);
 
 	return 0;
 }
@@ -416,6 +443,7 @@ static const struct cmd_t all_commands[] = {
 	{ "get", &do_get },
 	{ "adj", &do_adj },
 	{ "freq", &do_freq },
+	{ "phase", &do_phase },
 	{ "cmp", &do_cmp },
 	{ "caps", &do_caps },
 	{ "wait", &do_wait },
@@ -474,7 +502,7 @@ static int run_cmds(clockid_t clkid, int cmdc, char *cmdv[])
 
 int main(int argc, char *argv[])
 {
-	int c, cmdc, junk, print_level = LOG_INFO, result;
+	int c, cmdc, junk, cmd_line_print_level, result;
 	char **cmdv, *default_cmdv[] = { "caps" };
 	int use_syslog = 1, verbose = 1;
 	const char *progname;
@@ -489,9 +517,10 @@ int main(int argc, char *argv[])
 				  "l:qQvh"))) {
 		switch (c) {
 		case 'l':
-			if (get_arg_val_i(c, optarg, &print_level,
+			if (get_arg_val_i(c, optarg, &cmd_line_print_level,
 					  PRINT_LEVEL_MIN, PRINT_LEVEL_MAX))
 				return -1;
+			print_set_level(cmd_line_print_level);
 			break;
 		case 'q':
 			use_syslog = 0;
@@ -514,7 +543,6 @@ int main(int argc, char *argv[])
 	print_set_progname(progname);
 	print_set_verbose(verbose);
 	print_set_syslog(use_syslog);
-	print_set_level(print_level);
 
 	if ((argc - optind) < 1) {
 		usage(progname);

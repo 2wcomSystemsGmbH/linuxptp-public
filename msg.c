@@ -19,6 +19,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <malloc.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -27,10 +28,8 @@
 #include "print.h"
 #include "tlv.h"
 
-#define VERSION_MASK 0x0f
-#define VERSION      0x02
-
 int assume_two_step = 0;
+uint8_t ptp_hdr_ver = PTP_VERSION;
 
 /*
  * Head room fits a VLAN Ethernet header, and 'msg' is 64 bit aligned.
@@ -39,8 +38,8 @@ int assume_two_step = 0;
 
 struct message_storage {
 	unsigned char reserved[MSG_HEADROOM];
-	struct ptp_message msg;
-} PACKED;
+	struct ptp_message msg __attribute__((aligned (8)));
+};
 
 static TAILQ_HEAD(msg_pool, ptp_message) msg_pool = TAILQ_HEAD_INITIALIZER(msg_pool);
 
@@ -80,7 +79,7 @@ static void announce_post_recv(struct announce_msg *m)
 
 static int hdr_post_recv(struct ptp_header *m)
 {
-	if ((m->ver & VERSION_MASK) != VERSION)
+	if ((m->ver & MAJOR_VERSION_MASK) != PTP_MAJOR_VERSION)
 		return -EPROTO;
 	m->messageLength = ntohs(m->messageLength);
 	m->correction = net2host64(m->correction);
@@ -102,13 +101,13 @@ static uint8_t *msg_suffix(struct ptp_message *m)
 {
 	switch (msg_type(m)) {
 	case SYNC:
-		return NULL;
+		return m->sync.suffix;
 	case DELAY_REQ:
 		return m->delay_req.suffix;
 	case PDELAY_REQ:
-		return NULL;
+		return m->pdelay_req.suffix;
 	case PDELAY_RESP:
-		return NULL;
+		return m->pdelay_resp.suffix;
 	case FOLLOW_UP:
 		return m->follow_up.suffix;
 	case DELAY_RESP:
@@ -186,10 +185,12 @@ static int suffix_post_recv(struct ptp_message *msg, int len)
 {
 	uint8_t *ptr = msg_suffix(msg);
 	struct tlv_extra *extra;
-	int err;
+	int err, suffix_len = 0;
 
 	if (!ptr)
 		return 0;
+
+	msg_tlv_recycle(msg);
 
 	while (len >= sizeof(struct TLV)) {
 		extra = tlv_extra_alloc();
@@ -204,12 +205,14 @@ static int suffix_post_recv(struct ptp_message *msg, int len)
 			tlv_extra_recycle(extra);
 			return -EBADMSG;
 		}
+		suffix_len += sizeof(struct TLV);
 		len -= sizeof(struct TLV);
 		ptr += sizeof(struct TLV);
 		if (extra->tlv->length > len) {
 			tlv_extra_recycle(extra);
 			return -EBADMSG;
 		}
+		suffix_len += extra->tlv->length;
 		len -= extra->tlv->length;
 		ptr += extra->tlv->length;
 		err = tlv_post_recv(extra);
@@ -219,7 +222,7 @@ static int suffix_post_recv(struct ptp_message *msg, int len)
 		}
 		msg_tlv_attach(msg, extra);
 	}
-	return 0;
+	return suffix_len;
 }
 
 static void suffix_pre_send(struct ptp_message *msg)
@@ -233,7 +236,6 @@ static void suffix_pre_send(struct ptp_message *msg)
 		tlv->type = htons(tlv->type);
 		tlv->length = htons(tlv->length);
 	}
-	msg_tlv_recycle(msg);
 }
 
 static void timestamp_post_recv(struct ptp_message *m, struct Timestamp *ts)
@@ -307,6 +309,10 @@ struct ptp_message *msg_duplicate(struct ptp_message *msg, int cnt)
 	dup->refcnt = 1;
 	TAILQ_INIT(&dup->tlv_list);
 
+	if (!cnt) {
+		return dup;
+	}
+
 	err = msg_post_recv(dup, cnt);
 	if (err) {
 		switch (err) {
@@ -337,7 +343,7 @@ void msg_get(struct ptp_message *m)
 
 int msg_post_recv(struct ptp_message *m, int cnt)
 {
-	int pdulen, type, err;
+	int err, pdulen, suffix_len, type;
 
 	if (cnt < sizeof(struct ptp_header))
 		return -EBADMSG;
@@ -422,9 +428,13 @@ int msg_post_recv(struct ptp_message *m, int cnt)
 		break;
 	}
 
-	err = suffix_post_recv(m, cnt - pdulen);
-	if (err)
-		return err;
+	suffix_len = suffix_post_recv(m, cnt - pdulen);
+	if (suffix_len < 0) {
+		return suffix_len;
+	}
+	if (pdulen + suffix_len != m->header.messageLength) {
+		return -EBADMSG;
+	}
 
 	return 0;
 }
@@ -506,6 +516,27 @@ int msg_tlv_count(struct ptp_message *msg)
 		count++;
 
 	return count;
+}
+
+int msg_tlv_copy(struct ptp_message *msg, struct ptp_message *dup) {
+	struct tlv_extra *extra, *dup_extra;
+	struct TLV *tlv;
+
+	if (msg_type(msg) != msg_type(dup)) {
+		return -1;
+	}
+	if (msg->header.messageLength != ntohs(dup->header.messageLength)) {
+		return -1;
+	}
+
+	TAILQ_FOREACH(extra, &msg->tlv_list, list) {
+		tlv = (void *) extra->tlv - (void *) msg + (void *) dup;
+		dup_extra = tlv_extra_alloc();
+		dup_extra->tlv = tlv;
+		msg_tlv_attach(dup, dup_extra);
+	}
+
+	return 0;
 }
 
 const char *msg_type_string(int type)

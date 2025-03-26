@@ -18,6 +18,7 @@
  */
 #include <arpa/inet.h>
 #include <errno.h>
+#include <linux/limits.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -190,6 +191,35 @@ char *portaddr2str(struct PortAddress *addr)
 	return buf;
 }
 
+const char *ustate2str(enum unicast_state ustate)
+{
+	switch (ustate) {
+	case UC_WAIT:
+		return "WAIT";
+	case UC_HAVE_ANN:
+		return "HAVE_ANN";
+	case UC_NEED_SYDY:
+		return "NEED_SYDY";
+	case UC_HAVE_SYDY:
+		return "HAVE_SYDY";
+	}
+
+	return "???";
+}
+
+enum port_state port_state_normalize(enum port_state state)
+{
+	switch (state) {
+	case PS_MASTER:
+	case PS_SLAVE:
+	case PS_PRE_MASTER:
+	case PS_UNCALIBRATED:
+		return state;
+	default:
+		return PS_DISABLED;
+	}
+}
+
 void posix_clock_close(clockid_t clock)
 {
 	if (clock == CLOCK_REALTIME) {
@@ -200,6 +230,7 @@ void posix_clock_close(clockid_t clock)
 
 clockid_t posix_clock_open(const char *device, int *phc_index)
 {
+	char phc_device_path[PATH_MAX];
 	struct sk_ts_info ts_info;
 	char phc_device[19];
 	int clkid;
@@ -208,21 +239,29 @@ clockid_t posix_clock_open(const char *device, int *phc_index)
 	if (!strcasecmp(device, "CLOCK_REALTIME")) {
 		return CLOCK_REALTIME;
 	}
-	/* check if device is valid phc device */
-	clkid = phc_open(device);
-	if (clkid != CLOCK_INVALID) {
-		if (!strncmp(device, "/dev/ptp", strlen("/dev/ptp"))) {
-			int r = get_ranged_int(device + strlen("/dev/ptp"),
+
+	/* if the device name resolves so a plausible filesystem path, we
+	 * assume it is the path to a PHC char device, and treat it as such
+	 */
+	if (realpath(device, phc_device_path)) {
+		clkid = phc_open(device);
+		if (clkid == CLOCK_INVALID)
+			return clkid;
+
+		if (!strncmp(phc_device_path, "/dev/ptp", strlen("/dev/ptp"))) {
+			int r = get_ranged_int(phc_device_path + strlen("/dev/ptp"),
 					       phc_index, 0, 65535);
 			if (r) {
 				fprintf(stderr,
 					"failed to parse PHC index from %s\n",
-					device);
-				return -1;
+					phc_device_path);
+				phc_close(clkid);
+				return CLOCK_INVALID;
 			}
 		}
 		return clkid;
 	}
+
 	/* check if device is a valid ethernet device */
 	if (sk_get_ts_info(device, &ts_info) || !ts_info.valid) {
 		pr_err("unknown clock %s: %m", device);
@@ -752,4 +791,106 @@ int rate_limited(int interval, time_t *last)
 	*last = ts.tv_sec;
 
 	return 0;
+}
+
+const int B64[] = {62, -1, -1, -1, 63, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
+	-1, -1, -1, -1, -1, -1, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+	14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, -1, -1, -1, -1, -1, -1,
+	26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43,
+	44, 45, 46, 47, 48, 49, 50, 51};
+static inline int parseB64(const char c)
+{
+	if (c < '+' || c > 'z')
+		return -1;
+	return B64[c - '+'];
+}
+size_t base64_len(const char *str, size_t len)
+{
+	div_t q;
+	int diff = 0;
+
+	if (len == 0)
+		len = strlen(str);
+	if (len < 2)
+		return 0;
+	q = div(len, 4);
+	if (q.rem == 0) {
+		if (str[len - 1] == '=')
+			diff--;
+		if (str[len - 2] == '=')
+			diff--;
+	} else {
+		diff++;
+		if (q.rem > 2)
+			diff++;
+	}
+	return (q.quot * 3) + diff;
+}
+
+bool base64_decode(const char *in_str, size_t in_len, void *out, size_t *out_len)
+{
+	size_t len, i;
+	uint8_t *cur, d[4];
+
+	if (!in_str || !out_len)
+		return false;
+	if (in_len == 0)
+		in_len = strlen(in_str);
+	if (in_len == 0) {
+		*out_len = 0;
+		return true;
+	}
+	if (!out)
+		return false;
+	len = *out_len;
+	cur = (uint8_t *)out;
+	for (; in_len > 4; in_len -= 4) {
+		// Read 4 characters
+		for (i = 0; i < 4; i++) {
+			int r = parseB64(*in_str++);
+			if (r < 0)
+				return false;
+			d[i] = r;
+		}
+		if (len) {
+			*cur++ = ((d[0] << 2) & 0xfc) | ((d[1] >> 4) & 0x03);
+			len--;
+		}
+		if (len) {
+			*cur++ = ((d[1] << 4) & 0xf0) | ((d[2] >> 2) & 0x0f);
+			len--;
+		}
+		if (len) {
+			*cur++ = ((d[2] << 6) & 0xc0) | (d[3] & 0x3f);
+			len--;
+		}
+	}
+	if (in_len < 2)
+		return false;
+	if (in_len == 4 && in_str[3] == '=')
+		in_len--;
+	if (in_len == 3 && in_str[2] == '=')
+		in_len--;
+	for (i = 0; i < in_len; i++) {
+		int r = parseB64(*in_str++);
+		if (r < 0)
+			return false;
+		d[i] = r;
+	}
+	if (len) {
+		*cur++ = ((d[0] << 2) & 0xfc) | ((d[1] >> 4) & 0x03);
+		len--;
+	}
+	if (in_len > 2) {
+		if (len) {
+			*cur++ = ((d[1] << 4) & 0xf0) | ((d[2] >> 2) & 0x0f);
+			len--;
+		}
+		if (in_len == 4 && len) {
+			*cur++ = ((d[2] << 6) & 0xc0) | (d[3] & 0x3f);
+			len--;
+		}
+	}
+	*out_len = *out_len - len;
+	return true;
 }

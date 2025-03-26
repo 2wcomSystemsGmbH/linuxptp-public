@@ -36,6 +36,10 @@
 struct unicast_client_address {
 	LIST_ENTRY(unicast_client_address) list;
 	struct PortIdentity portIdentity;
+	struct {
+		UInteger16 announce;
+		UInteger16 sync;
+	} seqnum;
 	unsigned int message_types;
 	struct address addr;
 	time_t grant_tmo;
@@ -76,6 +80,30 @@ static int attach_grant(struct ptp_message *msg,
 	g->logInterMessagePeriod = req->logInterMessagePeriod;
 	g->durationField = duration;
 	g->flags = GRANT_UNICAST_RENEWAL_INVITED;
+
+	return 0;
+}
+
+static int attach_interface_rate(struct ptp_message *msg,
+                                uint64_t iface_bit_period,
+                                uint16_t  no_of_bits_before_ts,
+                                uint16_t  no_of_bits_after_ts)
+{
+	struct msg_interface_rate_tlv *mir;
+	struct tlv_extra *extra;
+
+	extra = msg_tlv_append(msg, sizeof(*mir));
+	if (!extra) {
+		return -1;
+	}
+	mir = (struct msg_interface_rate_tlv *) extra->tlv;
+	mir->type = TLV_ORGANIZATION_EXTENSION;
+	mir->length = sizeof(*mir) - sizeof(mir->type) - sizeof(mir->length);
+	memcpy(mir->id, itu_t_id, sizeof(itu_t_id));
+	mir->subtype[2] = 2;
+	mir->interfaceBitPeriod = iface_bit_period;
+	mir->numberOfBitsBeforeTimestamp = no_of_bits_before_ts;
+	mir->numberOfBitsAfterTimestamp = no_of_bits_after_ts;
 
 	return 0;
 }
@@ -181,12 +209,14 @@ static int unicast_service_clients(struct port *p,
 			continue;
 		}
 		if (client->message_types & (1 << ANNOUNCE)) {
-			if (port_tx_announce(p, &client->addr)) {
+			if (port_tx_announce(p, &client->addr,
+					     client->seqnum.announce++)) {
 				err = -1;
 			}
 		}
 		if (client->message_types & (1 << SYNC)) {
-			if (port_tx_sync(p, &client->addr)) {
+			if (port_tx_sync(p, &client->addr,
+					 client->seqnum.sync++)) {
 				err = -1;
 			}
 		}
@@ -250,9 +280,17 @@ static int unicast_service_reply(struct port *p, struct ptp_message *dst,
 	if (err) {
 		goto out;
 	}
+	if (p->iface_rate_tlv && duration > 0 && interface_ifinfo_valid(p->iface)) {
+		err = attach_interface_rate(msg,
+				interface_bitperiod(p->iface), 64, 720);
+		if (err) {
+			goto out;
+		}
+	}
+
 	err = port_prepare_and_send(p, msg, TRANS_GENERAL);
 	if (err) {
-		pr_err("port %hu: signaling message failed", portnum(p));
+		pr_err("%s: signaling message failed", p->log_name);
 	}
 out:
 	msg_put(msg);
@@ -286,6 +324,10 @@ int unicast_service_add(struct port *p, struct ptp_message *m,
 	case PDELAY_RESP:
 		return SERVICE_GRANTED;
 	default:
+		return SERVICE_DENIED;
+	}
+
+	if (abs(req->logInterMessagePeriod) > 30) {
 		return SERVICE_DENIED;
 	}
 

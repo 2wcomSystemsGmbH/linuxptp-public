@@ -29,6 +29,7 @@
 #include "pi.h"
 #include "print.h"
 #include "raw.h"
+#include "sad.h"
 #include "sk.h"
 #include "transport.h"
 #include "udp6.h"
@@ -72,7 +73,7 @@ int main(int argc, char *argv[])
 {
 	char *config = NULL, *req_phc = NULL, *progname;
 	enum clock_type type = CLOCK_TYPE_ORDINARY;
-	int c, err = -1, index, print_level;
+	int c, err = -1, index, cmd_line_print_level;
 	struct clock *clock = NULL;
 	struct option *opts;
 	struct config *cfg;
@@ -151,10 +152,10 @@ int main(int argc, char *argv[])
 			}
 			break;
 		case 'l':
-			if (get_arg_val_i(c, optarg, &print_level,
+			if (get_arg_val_i(c, optarg, &cmd_line_print_level,
 					  PRINT_LEVEL_MIN, PRINT_LEVEL_MAX))
 				goto out;
-			config_set_int(cfg, "logging_level", print_level);
+			config_set_int(cfg, "logging_level", cmd_line_print_level);
 			break;
 		case 'm':
 			config_set_int(cfg, "verbose", 1);
@@ -191,6 +192,13 @@ int main(int argc, char *argv[])
 	sk_check_fupsync = config_get_int(cfg, NULL, "check_fup_sync");
 	sk_tx_timeout = config_get_int(cfg, NULL, "tx_timestamp_timeout");
 	sk_hwts_filter_mode = config_get_int(cfg, NULL, "hwts_filter");
+
+	ptp_hdr_ver = config_get_int(cfg, NULL, "ptp_minor_version");
+	ptp_hdr_ver = (ptp_hdr_ver << 4) | PTP_MAJOR_VERSION;
+
+	if (sad_create(cfg)) {
+		goto out;
+	}
 
 	if (config_get_int(cfg, NULL, "clock_servo") == CLOCK_SERVO_NTPSHM) {
 		config_set_int(cfg, "kernel_leap", 0);
@@ -255,6 +263,7 @@ int main(int argc, char *argv[])
 out:
 	if (clock)
 		clock_destroy(clock);
+	sad_destroy(cfg);
 	config_destroy(cfg);
 	return err;
 }

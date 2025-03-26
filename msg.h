@@ -30,7 +30,16 @@
 #include "tlv.h"
 #include "tmv.h"
 
-#define PTP_VERSION 2
+/* Version definition for IEEE 1588-2019 */
+#define PTP_MAJOR_VERSION	2
+#define PTP_MINOR_VERSION	1
+#define PTP_VERSION		(PTP_MINOR_VERSION << 4 | PTP_MAJOR_VERSION)
+
+#define MAJOR_VERSION_MASK	0x0f
+
+/* Values for the transportSpecific field */
+#define TS_IEEE_8021AS (1<<4)
+#define TS_CMLDS       (2<<4)
 
 /* Values for the messageType field */
 #define SYNC                  0x0
@@ -78,18 +87,9 @@ struct hw_timestamp {
 	tmv_t sw;
 };
 
-enum controlField {
-	CTL_SYNC,
-	CTL_DELAY_REQ,
-	CTL_FOLLOW_UP,
-	CTL_DELAY_RESP,
-	CTL_MANAGEMENT,
-	CTL_OTHER,
-};
-
 struct ptp_header {
 	uint8_t             tsmt; /* transportSpecific | messageType */
-	uint8_t             ver;  /* reserved          | versionPTP  */
+	uint8_t             ver;  /* minorVersionPTP   | versionPTP  */
 	UInteger16          messageLength;
 	UInteger8           domainNumber;
 	Octet               reserved1;
@@ -119,6 +119,7 @@ struct announce_msg {
 struct sync_msg {
 	struct ptp_header   hdr;
 	struct Timestamp    originTimestamp;
+	uint8_t             suffix[0];
 } PACKED;
 
 struct delay_req_msg {
@@ -144,12 +145,14 @@ struct pdelay_req_msg {
 	struct ptp_header   hdr;
 	struct Timestamp    originTimestamp;
 	struct PortIdentity reserved;
+	uint8_t             suffix[0];
 } PACKED;
 
 struct pdelay_resp_msg {
 	struct ptp_header   hdr;
 	struct Timestamp    requestReceiptTimestamp;
 	struct PortIdentity requestingPortIdentity;
+	uint8_t             suffix[0];
 } PACKED;
 
 struct pdelay_resp_fup_msg {
@@ -307,6 +310,18 @@ struct tlv_extra *msg_tlv_append(struct ptp_message *msg, int length);
  */
 void msg_tlv_attach(struct ptp_message *msg, struct tlv_extra *extra);
 
+/**
+ * Copy list of TLVs from message that has gone through @ref msg_post_recv()
+ * to a network byte order duplicate message. This is useful for TC applications
+ * where any auth tlvs must be updated on the raw forwarded messages.
+ * @param msg  A message obtained using @ref msg_allocate().
+ *             The passed message must have been passed to @ref msg_post_recv()
+ *             in order to have tlv pointers attached.
+ * @param dup  A duplicate of msg that is still in network byte order.
+ * @return     -1 if the messages do not match, otherwise 0
+ */
+int msg_tlv_copy(struct ptp_message *msg, struct ptp_message *dup);
+
 /*
  * Return the number of TLVs attached to a message.
  * @param msg  A message obtained using @ref msg_allocate().
@@ -364,7 +379,8 @@ void msg_cleanup(void);
  * @param msg  A message obtained using @ref msg_allocate().
  *             The passed message must be in network byte order, not
  *             having been passed to @ref msg_post_recv().
- *
+ * @param cnt  The size of 'msg' in bytes. set to zero when
+ *             @ref msg_post_recv() is not required (icv calculation)
  * @return     Pointer to a message on success, NULL otherwise.
  *             The returned message will be in host byte order, having
  *             been passed to @ref msg_post_recv().
@@ -438,6 +454,11 @@ static inline Boolean msg_unicast(struct ptp_message *m)
 {
 	return field_is_set(m, 0, UNICAST);
 }
+
+/**
+ * Work around HW assuming PTP message version 2.0
+ */
+extern uint8_t ptp_hdr_ver;
 
 /**
  * Work around buggy 802.1AS switches.

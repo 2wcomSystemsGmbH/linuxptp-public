@@ -22,6 +22,7 @@
 #include "port_private.h"
 #include "print.h"
 #include "rtnl.h"
+#include "sad.h"
 #include "tc.h"
 
 void e2e_dispatch(struct port *p, enum fsm_event event, int mdiff)
@@ -50,6 +51,7 @@ void e2e_dispatch(struct port *p, enum fsm_event event, int mdiff)
 	case PS_FAULTY:
 	case PS_DISABLED:
 		port_disable(p);
+		sad_set_last_seqid(clock_config(p->clock), p->spp, -1);
 		break;
 	case PS_LISTENING:
 		port_set_announce_tmo(p);
@@ -60,6 +62,7 @@ void e2e_dispatch(struct port *p, enum fsm_event event, int mdiff)
 		break;
 	case PS_MASTER:
 	case PS_GRAND_MASTER:
+		sad_set_last_seqid(clock_config(p->clock), p->spp, -1);
 		break;
 	case PS_PASSIVE:
 		port_set_announce_tmo(p);
@@ -67,6 +70,7 @@ void e2e_dispatch(struct port *p, enum fsm_event event, int mdiff)
 	case PS_UNCALIBRATED:
 		flush_last_sync(p);
 		flush_delay_req(p);
+		sad_set_last_seqid(clock_config(p->clock), p->spp, -1);
 		/* fall through */
 	case PS_SLAVE:
 		port_set_announce_tmo(p);
@@ -76,14 +80,14 @@ void e2e_dispatch(struct port *p, enum fsm_event event, int mdiff)
 
 enum fsm_event e2e_event(struct port *p, int fd_index)
 {
-	int cnt, fd = p->fda.fd[fd_index];
+	int cnt, err, fd = p->fda.fd[fd_index];
 	enum fsm_event event = EV_NONE;
 	struct ptp_message *msg, *dup;
 
 	switch (fd_index) {
 	case FD_ANNOUNCE_TIMER:
 	case FD_SYNC_RX_TIMER:
-		pr_debug("port %hu: %s timeout", portnum(p),
+		pr_debug("%s: %s timeout", p->log_name,
 			 fd_index == FD_SYNC_RX_TIMER ? "rx sync" : "announce");
 		if (p->best) {
 			fc_clear(p->best);
@@ -92,7 +96,7 @@ enum fsm_event e2e_event(struct port *p, int fd_index)
 		return EV_ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES;
 
 	case FD_DELAY_TIMER:
-		pr_debug("port %hu: delay timeout", portnum(p));
+		pr_debug("%s: delay timeout", p->log_name);
 		port_set_delay_tmo(p);
 		delay_req_prune(p);
 		tc_prune(p);
@@ -111,7 +115,7 @@ enum fsm_event e2e_event(struct port *p, int fd_index)
 		return event;
 
 	case FD_QUALIFICATION_TIMER:
-		pr_debug("port %hu: qualification timeout", portnum(p));
+		pr_debug("%s: qualification timeout", p->log_name);
 		return EV_QUALIFICATION_TIMEOUT_EXPIRES;
 
 	case FD_MANNO_TIMER:
@@ -122,7 +126,7 @@ enum fsm_event e2e_event(struct port *p, int fd_index)
 		return EV_NONE;
 
 	case FD_RTNL:
-		pr_debug("port %hu: received link status notification", portnum(p));
+		pr_debug("%s: received link status notification", p->log_name);
 		rtnl_link_status(fd, p->name, port_link_status, p);
 		if (p->link_status == (LINK_UP|LINK_STATE_CHANGED)) {
 			return EV_FAULT_CLEARED;
@@ -142,7 +146,7 @@ enum fsm_event e2e_event(struct port *p, int fd_index)
 
 	cnt = transport_recv(p->trp, fd, msg);
 	if (cnt <= 0) {
-		pr_err("port %hu: recv message failed", portnum(p));
+		pr_err("%s: recv message failed", p->log_name);
 		msg_put(msg);
 		return EV_FAULT_DETECTED;
 	}
@@ -160,9 +164,27 @@ enum fsm_event e2e_event(struct port *p, int fd_index)
 		msg_put(msg);
 		return EV_NONE;
 	}
+	msg_tlv_copy(dup, msg);
 	if (tc_ignore(p, dup)) {
 		msg_put(dup);
 		dup = NULL;
+	} else {
+		err = sad_process_auth(clock_config(p->clock), p->spp, dup, msg);
+		if (err) {
+			switch (err) {
+			case -EBADMSG:
+				pr_err("%s: auth: bad message", p->log_name);
+				break;
+			case -EPROTO:
+				pr_debug("%s: auth: ignoring message", p->log_name);
+				break;
+			}
+			msg_put(msg);
+			if (dup) {
+				msg_put(dup);
+			}
+			return EV_NONE;
+		}
 	}
 
 	switch (msg_type(msg)) {

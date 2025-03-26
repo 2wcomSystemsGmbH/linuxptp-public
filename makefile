@@ -15,33 +15,52 @@
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-KBUILD_OUTPUT =
+KBUILD_OUTPUT ?=
 
 DEBUG	=
 CC	= $(CROSS_COMPILE)gcc
 VER     = -DVER=$(version)
 CFLAGS	= -Wall $(VER) $(incdefs) $(DEBUG) $(EXTRA_CFLAGS)
 LDLIBS	= -lm -lrt -pthread $(EXTRA_LDFLAGS)
-PRG	= ptp4l hwstamp_ctl nsm phc2sys phc_ctl pmc timemaster ts2phc
+PRG	= ptp4l hwstamp_ctl nsm phc2sys phc_ctl pmc timemaster ts2phc tz2alt
+SECURITY = sad.o
 FILTERS	= filter.o mave.o mmedian.o
-SERVOS	= linreg.o ntpshm.o nullf.o pi.o servo.o
+SERVOS	= linreg.o ntpshm.o nullf.o pi.o refclock_sock.o servo.o
 TRANSP	= raw.o transport.o udp.o udp6.o uds.o
-TS2PHC	= ts2phc.o lstab.o nmea.o serial.o sock.o ts2phc_generic_master.o \
- ts2phc_master.o ts2phc_phc_master.o ts2phc_nmea_master.o ts2phc_slave.o
+TS2PHC	= ts2phc.o lstab.o nmea.o serial.o sock.o ts2phc_generic_pps_source.o \
+ ts2phc_nmea_pps_source.o ts2phc_phc_pps_source.o ts2phc_pps_sink.o ts2phc_pps_source.o
 OBJ	= bmc.o clock.o clockadj.o clockcheck.o config.o designated_fsm.o \
  e2e_tc.o fault.o $(FILTERS) fsm.o hash.o interface.o monitor.o msg.o phc.o \
- port.o port_signaling.o pqueue.o print.o ptp4l.o p2p_tc.o rtnl.o $(SERVOS) \
- sk.o stats.o tc.o $(TRANSP) telecom.o tlv.o tsproc.o unicast_client.o \
- unicast_fsm.o unicast_service.o util.o version.o
+ pmc_common.o port.o port_signaling.o pqueue.o print.o ptp4l.o p2p_tc.o rtnl.o \
+ $(SECURITY) $(SERVOS) sk.o stats.o tc.o $(TRANSP) telecom.o tlv.o tsproc.o \
+ unicast_client.o unicast_fsm.o unicast_service.o util.o version.o
 
 OBJECTS	= $(OBJ) hwstamp_ctl.o nsm.o phc2sys.o phc_ctl.o pmc.o pmc_agent.o \
- pmc_common.o sysoff.o timemaster.o $(TS2PHC)
+ pmc_common.o sysoff.o timemaster.o $(TS2PHC) tz2alt.o
 SRC	= $(OBJECTS:.o=.c)
 DEPEND	= $(OBJECTS:.o=.d)
 srcdir	:= $(dir $(lastword $(MAKEFILE_LIST)))
-incdefs := $(shell $(srcdir)/incdefs.sh)
+incdefs := $(shell CC="$(CC)" $(srcdir)/incdefs.sh)
 version := $(shell $(srcdir)/version.sh $(srcdir))
 VPATH	= $(srcdir)
+
+ifeq (,$(findstring -DUSE_OPENSSL, $(EXTRA_CFLAGS)))
+incdefs := $(filter-out -DHAVE_OPENSSL, $(incdefs))
+endif
+
+ifneq (,$(findstring -DHAVE_NETTLE, $(incdefs)))
+LDLIBS += -lnettle
+SECURITY += sad_nettle.o
+else ifneq (,$(findstring -DHAVE_GNUTLS, $(incdefs)))
+LDLIBS += -lgnutls
+SECURITY += sad_gnutls.o
+else ifneq (,$(findstring -DHAVE_GNUPG, $(incdefs)))
+LDLIBS += -lgcrypt
+SECURITY += sad_gnupg.o
+else ifneq (,$(findstring -DHAVE_OPENSSL, $(incdefs)))
+LDLIBS += -lcrypto
+SECURITY += sad_openssl.o
+endif
 
 prefix	= /usr/local
 sbindir	= $(prefix)/sbin
@@ -53,14 +72,14 @@ all: $(PRG)
 ptp4l: $(OBJ)
 
 nsm: config.o $(FILTERS) hash.o interface.o msg.o nsm.o phc.o print.o \
- rtnl.o sk.o $(TRANSP) tlv.o tsproc.o util.o version.o
+ rtnl.o $(SECURITY) sk.o $(TRANSP) tlv.o tsproc.o util.o version.o
 
-pmc: config.o hash.o interface.o msg.o phc.o pmc.o pmc_common.o print.o sk.o \
- tlv.o $(TRANSP) util.o version.o
+pmc: config.o hash.o interface.o msg.o phc.o pmc.o pmc_common.o print.o \
+ $(SECURITY) sk.o tlv.o $(TRANSP) util.o version.o
 
 phc2sys: clockadj.o clockcheck.o config.o hash.o interface.o msg.o \
- phc.o phc2sys.o pmc_agent.o pmc_common.o print.o $(SERVOS) sk.o stats.o \
- sysoff.o tlv.o $(TRANSP) util.o version.o
+ phc.o phc2sys.o pmc_agent.o pmc_common.o print.o $(SECURITY) $(SERVOS) \
+ sk.o stats.o sysoff.o tlv.o $(TRANSP) util.o version.o
 
 hwstamp_ctl: hwstamp_ctl.o version.o
 
@@ -68,8 +87,12 @@ phc_ctl: phc_ctl.o phc.o sk.o util.o clockadj.o sysoff.o print.o version.o
 
 timemaster: phc.o print.o rtnl.o sk.o timemaster.o util.o version.o
 
-ts2phc: config.o clockadj.o hash.o interface.o phc.o print.o $(SERVOS) sk.o \
- $(TS2PHC) util.o version.o
+ts2phc: config.o clockadj.o hash.o interface.o msg.o phc.o pmc_agent.o \
+ pmc_common.o print.o $(SECURITY) $(SERVOS) sk.o $(TS2PHC) tlv.o transport.o \
+ raw.o udp.o udp6.o uds.o util.o version.o
+
+tz2alt: config.o hash.o interface.o lstab.o msg.o phc.o pmc_common.o print.o \
+ $(SECURITY) sk.o tlv.o $(TRANSP) tz2alt.o util.o version.o
 
 version.o: .version version.sh $(filter-out version.d,$(DEPEND))
 

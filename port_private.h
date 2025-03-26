@@ -26,9 +26,10 @@
 #include "fsm.h"
 #include "monitor.h"
 #include "msg.h"
+#include "pmc_common.h"
+#include "power_profile.h"
 #include "tmv.h"
-
-#define NSEC2SEC 1000000000LL
+#include "util.h"
 
 enum syfu_state {
 	SF_EMPTY,
@@ -62,6 +63,7 @@ struct tc_txd {
 struct port {
 	LIST_ENTRY(port) list;
 	const char *name;
+	char *log_name;
 	struct interface *iface;
 	struct clock *clock;
 	struct transport *trp;
@@ -141,12 +143,20 @@ struct port {
 	enum link_state     link_status;
 	struct fault_interval flt_interval_pertype[FT_CNT];
 	enum fault_type     last_fault_type;
-	unsigned int        versionNumber; /*UInteger4*/
+	UInteger8           versionNumber; /* UInteger4 */
+	UInteger8	    delay_response_counter;
+	UInteger8	    delay_response_timeout;
+	UInteger8	    allowedLostResponses;
+	bool		    iface_rate_tlv;
+	Integer64	    portAsymmetry;
 	struct PortStats    stats;
+	struct PortServiceStats    service_stats;
 	/* foreignMasterDS */
 	LIST_HEAD(fm, foreign_clock) foreign_masters;
 	/* TC book keeping */
 	TAILQ_HEAD(tct, tc_txd) tc_transmitted;
+	/* power profile */
+	struct ieee_c37_238_settings_np pwr;
 	/* unicast client mode */
 	struct unicast_master_table *unicast_master_table;
 	/* unicast service mode */
@@ -154,6 +164,15 @@ struct port {
 	int inhibit_multicast_service;
 	/* slave event monitoring */
 	struct monitor *slave_event_monitor;
+	bool unicast_state_dirty;
+	int spp;
+	UInteger32 active_key_id;
+	struct {
+		unsigned int timer_count;
+		time_t last_renewal;
+		struct pmc *pmc;
+		int port;
+	} cmlds;
 };
 
 #define portnum(p) (p->portIdentity.portNumber)
@@ -179,17 +198,18 @@ void port_link_status(void *ctx, int index, int linkup);
 int port_set_announce_tmo(struct port *p);
 int port_set_delay_tmo(struct port *p);
 int port_set_qualification_tmo(struct port *p);
+int port_set_sync_rx_tmo(struct port *p);
 void port_show_transition(struct port *p, enum port_state next,
 			  enum fsm_event event);
 struct ptp_message *port_signaling_uc_construct(struct port *p,
 						struct address *address,
 						struct PortIdentity *tpid);
-int port_tx_announce(struct port *p, struct address *dst);
+int port_tx_announce(struct port *p, struct address *dst, uint16_t sequence_id);
 int port_tx_interval_request(struct port *p,
 			     Integer8 announceInterval,
 			     Integer8 timeSyncInterval,
 			     Integer8 linkDelayInterval);
-int port_tx_sync(struct port *p, struct address *dst);
+int port_tx_sync(struct port *p, struct address *dst, uint16_t sequence_id);
 int process_announce(struct port *p, struct ptp_message *m);
 void process_delay_resp(struct port *p, struct ptp_message *m);
 void process_follow_up(struct port *p, struct ptp_message *m);

@@ -45,6 +45,9 @@ struct config {
 
 	/* unicast master tables */
 	STAILQ_HEAD(ucmtab_head, unicast_master_table) unicast_master_tables;
+
+	/* security association database */
+	STAILQ_HEAD(sa_head, security_association) security_association_database;
 };
 
 int config_read(const char *name, struct config *cfg);
@@ -60,6 +63,9 @@ double config_get_double(struct config *cfg, const char *section,
 
 int config_get_int(struct config *cfg, const char *section,
 		   const char *option);
+
+uint32_t config_get_uint(struct config *cfg, const char *section,
+			 const char *option);
 
 char *config_get_string(struct config *cfg, const char *section,
 			const char *option);
@@ -83,6 +89,8 @@ static inline int config_set_int(struct config *cfg,
 {
 	return config_set_section_int(cfg, NULL, option, val);
 }
+
+int config_set_uint(struct config *cfg, const char *option, uint32_t val);
 
 int config_set_string(struct config *cfg, const char *option,
 		      const char *val);
