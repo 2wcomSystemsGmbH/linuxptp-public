@@ -3205,6 +3205,12 @@ static enum fsm_event bc_event(struct port *p, int fd_index)
 	}
 	if (msg_sots_missing(msg) &&
 	    !(p->timestamping == TS_P2P1STEP && msg_type(msg) == PDELAY_REQ)) {
+		if (msg_type(msg) == DELAY_REQ && p->state != PS_MASTER
+		    && p->state != PS_GRAND_MASTER) {
+			pr_debug("%s: received DELAY_REQ without timestamp, ignoring message",
+				 p->log_name);
+			return EV_NONE;
+		}
 		pr_err("%s: received %s without timestamp",
 		       p->log_name, msg_type_string(msg_type(msg)));
 		msg_put(msg);
