@@ -3209,6 +3209,7 @@ static enum fsm_event bc_event(struct port *p, int fd_index)
 		    && p->state != PS_GRAND_MASTER) {
 			pr_debug("%s: received DELAY_REQ without timestamp, ignoring message",
 				 p->log_name);
+			msg_put(msg);
 			return EV_NONE;
 		}
 		pr_err("%s: received %s without timestamp",
