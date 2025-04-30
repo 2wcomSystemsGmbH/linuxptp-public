@@ -140,6 +140,10 @@ tmv_t get_raw_delay(struct tsproc *tsp)
 		pr_debug("t2 - t3 = %+10" PRId64, tmv_to_nanoseconds(t23));
 		pr_debug("t4 - t1 = %+10" PRId64, tmv_to_nanoseconds(t41));
 		pr_debug("rr = %.9f", tsp->clock_rate_ratio);
+		pr_debug("t1 = %+10" PRId64, tmv_to_nanoseconds(tsp->t1));
+		pr_debug("t2 = %+10" PRId64, tmv_to_nanoseconds(tsp->t2));
+		pr_debug("t3 = %+10" PRId64, tmv_to_nanoseconds(tsp->t3));
+		pr_debug("t4 = %+10" PRId64, tmv_to_nanoseconds(tsp->t4));
 	}
 
 	return delay;
@@ -153,6 +157,21 @@ int tsproc_update_delay(struct tsproc *tsp, tmv_t *delay)
 		return -1;
 
 	raw_delay = get_raw_delay(tsp);
+	if (tmv_sign(tmv_sub(tsp->t3, tsp->t2)) < 0) {
+		pr_info("local clock runs backward by %10" PRId64 " ; skipping update",
+			tmv_to_nanoseconds(tmv_sub(tsp->t3, tsp->t2)));
+		return -1;
+	}
+	if (tmv_sign(tmv_sub(tsp->t4, tsp->t1)) < 0) {
+		pr_info("remote clock runs backward by %10" PRId64 " ; skipping update",
+			tmv_to_nanoseconds(tmv_sub(tsp->t4, tsp->t1)));
+		return -1;
+	}
+	if (tmv_sign(raw_delay) < 0) {
+		pr_info("negative delay %10" PRId64 " ; skipping update",
+			tmv_to_nanoseconds(raw_delay));
+		return -1;
+	}
 	tsp->filtered_delay = filter_sample(tsp->delay_filter, raw_delay);
 	tsp->filtered_delay_valid = 1;
 
